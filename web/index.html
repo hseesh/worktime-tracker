@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%237aa2f7'/><circle cx='50' cy='50' r='38' fill='none' stroke='%23c0caf5' stroke-width='3'/><line x1='50' y1='50' x2='50' y2='25' stroke='%231a1b26' stroke-width='4' stroke-linecap='round'/><line x1='50' y1='50' x2='68' y2='50' stroke='%231a1b26' stroke-width='4' stroke-linecap='round'/></svg>">
+<title>WorkTime Tracker</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/echarts@5/dist/echarts.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root {
+  --bg: #16161e;
+  --bg-main: #1a1b26;
+  --bg-card: #1f2335;
+  --bg-card-hover: #24283b;
+  --bg-sidebar: #13131a;
+  --text: #c0caf5;
+  --text-dim: #9aa5ce;
+  --text-muted: #565f89;
+  --text-faint: #414868;
+  --accent: #7aa2f7;
+  --accent-dim: rgba(122,162,247,.12);
+  --green: #9ece6a;
+  --red: #f7768e;
+  --yellow: #e0af68;
+  --cyan: #7dcfff;
+  --purple: #bb9af7;
+  --orange: #ff9e64;
+  --border: #2a2e3f;
+  --border-light: rgba(42,46,63,.6);
+  --radius: 14px;
+  --radius-sm: 8px;
+  --shadow: 0 2px 12px rgba(0,0,0,.25);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,.35);
+  --transition: .2s cubic-bezier(.4,0,.2,1);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: var(--bg-main); color: var(--text); -webkit-font-smoothing: antialiased; }
+#app { display: flex; height: 100vh; overflow: hidden; }
+
+/* ---- Sidebar ---- */
+.sidebar { width: 220px; background: var(--bg-sidebar); display: flex; flex-direction: column; flex-shrink: 0; border-right: 1px solid var(--border); }
+.sidebar .logo { padding: 28px 22px 20px; display: flex; align-items: center; gap: 10px; }
+.sidebar .logo svg { width: 28px; height: 28px; }
+.sidebar .logo span { font-size: 17px; font-weight: 800; color: var(--text); letter-spacing: -.02em; }
+.sidebar .nav-section { padding: 4px 12px; }
+.sidebar .nav-section-label { padding: 16px 10px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); }
+.sidebar .nav-btn {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 11px 12px; border: none; background: none; color: var(--text-muted);
+  font-size: 14px; font-weight: 500; text-align: left; cursor: pointer;
+  border-radius: var(--radius-sm); transition: all var(--transition);
+  margin-bottom: 2px;
+}
+.sidebar .nav-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+.sidebar .nav-btn:hover { color: var(--text-dim); background: rgba(255,255,255,.04); }
+.sidebar .nav-btn.active { color: var(--accent); background: var(--accent-dim); font-weight: 600; }
+.sidebar .nav-btn.active svg { color: var(--accent); }
+.sidebar .version { margin-top: auto; padding: 16px 22px; color: var(--text-faint); font-size: 11px; font-weight: 500; }
+
+/* ---- Main ---- */
+.main { flex: 1; overflow-y: auto; padding: 32px 36px; }
+.page-title { font-size: 24px; font-weight: 700; color: var(--text); margin-bottom: 24px; letter-spacing: -.02em; }
+
+/* ---- Stat Cards ---- */
+.cards-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card {
+  background: var(--bg-card); border-radius: var(--radius); padding: 22px 24px;
+  border: 1px solid var(--border); position: relative; overflow: hidden;
+  transition: all var(--transition);
+}
+.stat-card:hover { border-color: var(--text-faint); transform: translateY(-1px); }
+.stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: var(--radius) var(--radius) 0 0; }
+.stat-card.total::before { background: linear-gradient(90deg, var(--accent), var(--purple)); }
+.stat-card.indie::before { background: linear-gradient(90deg, var(--green), #73daca); }
+.stat-card.work::before { background: linear-gradient(90deg, var(--accent), var(--cyan)); }
+.stat-card.now::before { background: linear-gradient(90deg, var(--yellow), var(--orange)); }
+.stat-card .label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.stat-card .value { font-size: 26px; font-weight: 800; color: var(--text); letter-spacing: -.02em; }
+.stat-card .value.green { color: var(--green); }
+.stat-card .value.blue { color: var(--accent); }
+.stat-card .value.yellow { color: var(--yellow); }
+.stat-card .value.dim { color: var(--text-faint); font-weight: 600; }
+.stat-card .sub { font-size: 13px; color: var(--text-muted); margin-top: 2px; font-weight: 500; }
+.stat-card .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+/* ---- Progress bar ---- */
+.progress-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 10px; display: flex; }
+.progress-bar .fill-green { background: var(--green); height: 100%; transition: width .5s ease; }
+.progress-bar .fill-blue { background: var(--accent); height: 100%; transition: width .5s ease; }
+.mini-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.mini-bar .mini-bar-fill { height: 100%; border-radius: 3px; transition: width .5s ease; }
+.mini-bar .fill-green { background: var(--green); }
+.mini-bar .fill-blue { background: var(--accent); }
+.mini-bar .fill-gray { background: var(--text-faint); }
+
+/* ---- Card ---- */
+.card {
+  background: var(--bg-card); border-radius: var(--radius); padding: 22px 24px;
+  border: 1px solid var(--border); transition: border-color var(--transition);
+}
+.card:hover { border-color: var(--text-faint); }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.card-header .title { font-size: 14px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+.card-header .badge { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+
+/* ---- Grid ---- */
+.grid-2 { display: grid; grid-template-columns: 4fr 6fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 1000px) { .grid-2 { grid-template-columns: 1fr; } }
+
+/* ---- Chart ---- */
+.chart-container { height: 320px; }
+
+/* ---- Table ---- */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 10px 14px; color: var(--text-muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
+td { padding: 10px 14px; border-bottom: 1px solid var(--border-light); transition: background var(--transition); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(122,162,247,.05); }
+.text-right { text-align: right; }
+.text-green { color: var(--green); font-weight: 600; }
+.text-cyan { color: var(--cyan); font-weight: 600; }
+.text-yellow { color: var(--yellow); font-weight: 600; }
+.text-purple { color: var(--purple); font-weight: 600; }
+.text-dim { color: var(--text-muted); }
+.text-faint { color: var(--text-faint); }
+.tag { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+.tag-indie { background: rgba(158,206,106,.12); color: var(--green); }
+.tag-work { background: rgba(122,162,247,.12); color: var(--accent); }
+.tag-other { background: rgba(86,95,137,.15); color: var(--text-muted); }
+.app-cell { display: flex; align-items: center; gap: 10px; }
+.app-icon { width: 20px; height: 20px; border-radius: 4px; flex-shrink: 0; object-fit: contain; }
+.app-text { display: flex; align-items: center; gap: 8px; }
+
+/* ---- Toolbar ---- */
+.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.toolbar .spacer { flex: 1; }
+.toolbar label { font-size: 14px; color: var(--text-muted); font-weight: 500; }
+select, input[type="text"], input[type="number"] {
+  background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 9px 14px; font-size: 14px; font-family: inherit; outline: none;
+  transition: border-color var(--transition);
+}
+select:hover, input:hover { border-color: var(--text-faint); }
+select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.btn {
+  padding: 9px 18px; border: none; border-radius: var(--radius-sm); cursor: pointer;
+  font-size: 14px; font-weight: 600; font-family: inherit; transition: all var(--transition);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn-primary { background: var(--accent); color: #16161e; }
+.btn-primary:hover { background: #8db4ff; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(122,162,247,.3); }
+.btn-danger { background: rgba(247,118,142,.15); color: var(--red); }
+.btn-danger:hover { background: rgba(247,118,142,.25); }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+
+/* ---- Filter tabs ---- */
+.filter-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+.filter-tabs .tab {
+  padding: 7px 18px; border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text-muted); border-radius: 20px; cursor: pointer; font-size: 13px; font-weight: 500;
+  transition: all var(--transition);
+}
+.filter-tabs .tab:hover { color: var(--text-dim); border-color: var(--text-faint); }
+.filter-tabs .tab.active { background: var(--accent); color: #16161e; border-color: var(--accent); font-weight: 600; }
+
+/* ---- Settings ---- */
+.settings-section { margin-bottom: 20px; }
+.settings-section h3 { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 14px; }
+.form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.form-row label { min-width: 170px; color: var(--text-muted); font-size: 14px; font-weight: 500; }
+.form-row input { flex: 1; max-width: 400px; }
+.checkbox-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.checkbox-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+.checkbox-row label { color: var(--text-dim); font-size: 14px; cursor: pointer; }
+.desc { font-size: 13px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.5; }
+
+/* ---- Status badge ---- */
+.status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.status-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; }
+.status-active { background: rgba(158,206,106,.12); color: var(--green); }
+.status-active::before { background: var(--green); animation: pulse 2s ease-in-out infinite; }
+.status-idle { background: rgba(224,175,104,.12); color: var(--yellow); }
+.status-idle::before { background: var(--yellow); }
+.status-empty { color: var(--text-faint); }
+.status-empty::before { background: var(--text-faint); }
+
+/* ---- Empty state ---- */
+.empty-state { text-align: center; padding: 40px 20px; color: var(--text-faint); font-size: 14px; }
+
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+/* ---- Fade transition ---- */
+.fade-enter-active, .fade-leave-active { transition: opacity .2s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="logo">
+      <svg viewBox="0 0 128 128" fill="none">
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7aa2f7"/><stop offset="100%" stop-color="#bb9af7"/></linearGradient></defs>
+        <rect width="128" height="128" rx="28" fill="url(#lg)"/>
+        <circle cx="64" cy="68" r="34" fill="none" stroke="#c0caf5" stroke-width="7" stroke-linecap="round"/>
+        <line x1="64" y1="68" x2="64" y2="44" stroke="#16161e" stroke-width="7" stroke-linecap="round"/>
+        <line x1="64" y1="68" x2="84" y2="68" stroke="#16161e" stroke-width="7" stroke-linecap="round"/>
+        <circle cx="64" cy="68" r="5" fill="#16161e"/>
+      </svg>
+      <span>WorkTime</span>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-label">Menu</div>
+      <button v-for="item in navItems" :key="item.id"
+        class="nav-btn" :class="{active: currentTab === item.id}"
+        @click="currentTab = item.id">
+        <svg v-html="item.icon"></svg>
+        {{ item.label }}
+      </button>
+    </div>
+    <div class="version">v2.0.0 · Web Edition</div>
+  </div>
+
+  <!-- Main content -->
+  <div class="main">
+    <!-- Dashboard -->
+    <div v-show="currentTab === 'dashboard'">
+      <div class="page-title">Today's Overview</div>
+      <div class="cards-row">
+        <div class="stat-card total">
+          <div class="label">Total Tracked</div>
+          <div class="value">{{ dash.cards.total }}</div>
+        </div>
+        <div class="stat-card indie">
+          <div class="label">Indie Dev</div>
+          <div class="value green">{{ dash.cards.indie }}</div>
+          <div class="sub">{{ dash.cards.indie_pct }}% of total</div>
+        </div>
+        <div class="stat-card work">
+          <div class="label">Work</div>
+          <div class="value blue">{{ dash.cards.work }}</div>
+          <div class="sub">{{ dash.cards.work_pct }}% of total</div>
+        </div>
+        <div class="stat-card now">
+          <div class="label">Currently Tracking</div>
+          <div class="value" :class="{'green': dash.cards.current !== '--', 'dim': dash.cards.current === '--'}">
+            <span v-if="dash.cards.current === '--'">--</span>
+            <span v-else style="display:flex;flex-direction:column;gap:3px">
+              <span v-if="dash.cards.current_fg" style="font-size:14px"><span class="live-dot" :style="dotStyle(dash.cards.current_fg_tag)"></span>{{ dash.cards.current_fg }}</span>
+              <span v-if="dash.cards.current_codex && dash.cards.current_codex.length" style="font-size:14px;color:#7c88b3"><span class="live-dot" style="background:#7aa2f7;animation-delay:1s"></span>Codex: {{ dash.cards.current_codex.join(', ') }}</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Indie/Work split bar -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="title">Indie / Work Split</span></div>
+        <div class="progress-bar" style="height:10px">
+          <div class="fill-green" :style="{width: dash.cards.indie_pct + '%'}"></div>
+          <div class="fill-blue" :style="{width: dash.cards.work_pct + '%'}"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:13px">
+          <span class="text-green">● Indie {{ dash.cards.indie_pct }}%</span>
+          <span class="text-blue" style="color:var(--accent);font-weight:600">● Work {{ dash.cards.work_pct }}%</span>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><span class="title">Tag Distribution</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Tag</th><th>Share</th><th class="text-right">Duration</th><th class="text-right">%</th></tr></thead>
+              <tbody><tr v-for="r in dash.tag_distribution" :key="r.tag">
+                <td><span class="tag" :style="tagStyle(r.tag)">{{ r.tag }}</span></td>
+                <td><div class="mini-bar"><div class="mini-bar-fill" :style="{width: r.pct + '%', background: tagColor(r.tag)}"></div></div></td>
+                <td class="text-right" :style="{color: tagColor(r.tag), fontWeight: 600}">{{ r.duration }}</td>
+                <td class="text-right text-dim">{{ r.pct }}%</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="title">Timeline (Today)</span></div>
+          <div ref="timelineChart" class="chart-container"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><span class="title">Time Distribution</span></div>
+          <div ref="pieChart" class="chart-container"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="title">App Breakdown</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>App</th><th>Tag</th><th class="text-right">Duration</th><th class="text-right">%</th></tr></thead>
+              <tbody><tr v-for="r in dash.app_breakdown" :key="r.name">
+                <td>
+                  <div class="app-cell">
+                    <img v-if="r.process_name" :src="'/api/icon/' + r.process_name" class="app-icon" @error="$event.target.style.display='none'" />
+                    <div class="app-text">
+                      {{ r.name.replace(/^Other \(/g, '').replace(/\)$/g, '') }}
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  <select :value="r.tag" @change="changeAppTag(r.process_name, r.name, $event.target.value)" style="padding:3px 8px;font-size:12px;min-width:80px">
+                    <option v-for="t in settings.tags" :key="t.name" :value="t.name">{{ t.name }}</option>
+                  </select>
+                </td>
+                <td class="text-right">{{ r.duration }}</td>
+                <td class="text-right text-dim">{{ r.percent }}%</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="title">Indie Dev Details</span></div>
+        <div class="table-wrap">
+            <table>
+              <thead><tr><th>Source</th><th>App / Project</th><th class="text-right">Duration</th><th class="text-right">% of Indie</th></tr></thead>
+              <tbody>
+                <tr v-for="r in dash.indie_details" :key="r.name">
+                  <td><span class="tag" :class="r.source === 'Codex Hook' ? 'tag-work' : 'tag-indie'">{{ r.source }}</span></td>
+                  <td>{{ r.name }}</td>
+                  <td class="text-right text-green">{{ r.duration }}</td>
+                  <td class="text-right text-dim">{{ r.percent }}%</td>
+                </tr>
+                <tr v-if="dash.indie_details.length === 0"><td colspan="4" class="empty-state">No indie dev time tracked today</td></tr>
+              </tbody>
+            </table>
+          </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="title">Codex Activity</span>
+          <span class="badge" v-if="dash.codex_active_count > 0" style="color:var(--green)">{{ dash.codex_active_count }} active</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Project</th><th class="text-right">Duration</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr v-for="r in dash.codex_table" :key="r.project">
+                <td>{{ r.project }}</td>
+                <td class="text-right">{{ r.duration }}</td>
+                <td><span class="status-badge" :class="r.status === 'Active' ? 'status-active' : (r.status ? 'status-idle' : 'status-empty')">{{ r.status || '--' }}</span></td>
+              </tr>
+              <tr v-if="dash.codex_table.length === 0"><td colspan="3" class="empty-state">No Codex events received</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div v-show="currentTab === 'history'">
+      <div class="page-title">History & Trends</div>
+      <div class="cards-row">
+        <div class="stat-card total">
+          <div class="label">Range Total</div>
+          <div class="value">{{ hist.cards.total }}</div>
+        </div>
+        <div class="stat-card indie">
+          <div class="label">Indie Dev</div>
+          <div class="value green">{{ hist.cards.indie }}</div>
+          <div class="sub">{{ hist.cards.indie_pct }}% of total</div>
+        </div>
+        <div class="stat-card work">
+          <div class="label">Work</div>
+          <div class="value blue">{{ hist.cards.work }}</div>
+          <div class="sub">{{ hist.cards.work_pct }}% of total</div>
+        </div>
+        <div class="stat-card now">
+          <div class="label">Daily Average</div>
+          <div class="value">{{ hist.cards.avg }}</div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <label>Range:</label>
+        <select v-model="histDays" @change="loadHistory">
+          <option :value="7">Last 7 days</option>
+          <option :value="14">Last 14 days</option>
+          <option :value="30">Last 30 days</option>
+          <option value="all">All Time</option>
+        </select>
+        <div class="spacer"></div>
+        <button class="btn btn-primary" @click="exportCsv">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+          Export CSV
+        </button>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="title">Daily Total Trend</span></div>
+        <div ref="trendChart" class="chart-container"></div>
+      </div>
+      <div class="grid-2" style="margin-bottom:16px">
+        <div class="card">
+          <div class="card-header"><span class="title">Tag Distribution Trend</span></div>
+          <div ref="tagTrendChart" class="chart-container"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="title">Weekly Summary by Tag</span></div>
+          <div ref="periodChart" class="chart-container"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="title">Per-App Summary</span><span class="badge">Selected Range</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>App</th><th style="width:25%">Share</th><th class="text-right">Total</th><th class="text-right">Daily Avg</th><th class="text-right">Days</th></tr></thead>
+            <tbody><tr v-for="r in hist.per_app" :key="r.name">
+              <td>
+                <div class="app-cell">
+                  <img v-if="r.process_name" :src="'/api/icon/' + r.process_name" class="app-icon" @error="$event.target.style.display='none'" />
+                  <div class="app-text">
+                    <span class="tag" :style="tagStyle(r.tag)">{{ r.tag }}</span>
+                    {{ r.name.replace(/^Other \(/g, '').replace(/\)$/g, '') }}
+                  </div>
+                </div>
+              </td>
+              <td>
+                <div class="mini-bar"><div class="mini-bar-fill" :style="{width: r.pct + '%', background: tagColor(r.tag)}"></div></div>
+              </td>
+              <td class="text-right" :style="{color: tagColor(r.tag), fontWeight: r.tag === 'Indie' ? 600 : 400}">{{ r.total }}</td>
+              <td class="text-right text-dim">{{ r.avg }}</td>
+              <td class="text-right text-faint" style="font-size:12px">{{ r.days_active }}d</td>
+            </tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Efficiency -->
+    <div v-show="currentTab === 'efficiency'">
+      <div class="page-title">Efficiency Analysis</div>
+      <div class="cards-row">
+        <div class="stat-card" style="border-left:3px solid var(--green)">
+          <div class="label">Longest Focus Session</div>
+          <div class="value green">{{ eff.focus_sessions.length > 0 ? eff.focus_sessions[0].duration : '--' }}</div>
+          <div class="sub" v-if="eff.focus_sessions.length > 0">{{ eff.focus_sessions[0].display_name }}</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--red)">
+          <div class="label">App Switches Today</div>
+          <div class="value">{{ eff.switch_frequency.reduce((a, s) => a + s.switches, 0) }}</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--blue)">
+          <div class="label">Idle Time Today</div>
+          <div class="value dim">{{ eff.idle_time }}</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--accent)">
+          <div class="label">Focus Sessions > 10m</div>
+          <div class="value">{{ eff.focus_sessions.filter(s => s.seconds > 600).length }}</div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:16px">
+        <div class="card">
+          <div class="card-header"><span class="title">Peak Hours (Avg)</span><span class="badge">{{ histDays }}d avg</span></div>
+          <div ref="peakHoursChart" class="chart-container"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="title">App Switch Frequency</span><span class="badge">Today</span></div>
+          <div ref="switchFreqChart" class="chart-container"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="title">Top Focus Sessions</span><span class="badge">Today</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>App</th><th>Tag</th><th class="text-right">Duration</th><th>Start</th><th>End</th></tr></thead>
+            <tbody>
+              <tr v-for="s in eff.focus_sessions" :key="s.start_time">
+                <td>{{ s.display_name }}</td>
+                <td><span class="tag" :style="tagStyle(s.tag)">{{ s.tag }}</span></td>
+                <td class="text-right">{{ s.duration }}</td>
+                <td class="text-dim" style="font-size:12px">{{ s.start_time.slice(11) }}</td>
+                <td class="text-dim" style="font-size:12px">{{ s.end_time.slice(11) }}</td>
+              </tr>
+              <tr v-if="eff.focus_sessions.length === 0"><td colspan="5" class="empty-state">No focus sessions recorded yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event Log -->
+    <div v-show="currentTab === 'events'">
+      <div class="page-title">Event Log</div>
+      <div class="filter-tabs">
+        <div class="tab" :class="{active: eventFilter === 'all'}" @click="eventFilter = 'all'; loadEvents()">All</div>
+        <div class="tab" :class="{active: eventFilter === 'codex'}" @click="eventFilter = 'codex'; loadEvents()">Codex Events</div>
+        <div class="tab" :class="{active: eventFilter === 'foreground'}" @click="eventFilter = 'foreground'; loadEvents()">Foreground</div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="title">Recent Events</span><span class="badge">Last 200</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Source</th><th>Event</th><th>Session</th><th>Project / App</th><th>Detail</th></tr></thead>
+            <tbody>
+              <tr v-for="(r, i) in events" :key="i">
+                <td class="text-faint" style="font-size:12px;font-family:monospace">{{ r.time }}</td>
+                <td><span class="tag" :class="r.source === 'Codex' ? 'tag-work' : 'tag-indie'">{{ r.source }}</span></td>
+                <td class="text-dim">{{ r.action }}</td>
+                <td class="text-faint" style="font-size:12px">{{ r.session }}</td>
+                <td>{{ r.target }}</td>
+                <td class="text-faint">{{ r.detail }}</td>
+              </tr>
+              <tr v-if="events.length === 0"><td colspan="6" class="empty-state">No events yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div v-show="currentTab === 'settings'">
+      <div class="page-title">Settings</div>
+
+      <div class="card settings-section">
+        <h3>Idle Threshold</h3>
+        <div class="form-row">
+          <label>Idle Threshold (seconds)</label>
+          <input type="number" v-model.number="settings.idle_threshold" min="10" max="3600">
+          <button class="btn btn-primary btn-sm" @click="saveSettings">Save</button>
+        </div>
+      </div>
+
+      <div class="card settings-section">
+        <h3>General</h3>
+        <div class="checkbox-row">
+          <input type="checkbox" id="autostart" v-model="settings.auto_start_with_windows" @change="saveSettings">
+          <label for="autostart">Start with Windows</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="minimized" v-model="settings.auto_start_minimized" @change="saveSettings">
+          <label for="minimized">Start minimized to tray</label>
+        </div>
+      </div>
+
+      <div class="card settings-section">
+        <h3>Monitored Processes</h3>
+        <div class="form-row">
+          <input type="text" v-model="newProc.process_name" placeholder="Process name (e.g. devenv.exe)" style="flex:2">
+          <input type="text" v-model="newProc.display_name" placeholder="Display name (e.g. Visual Studio)" style="flex:2">
+          <button class="btn btn-primary btn-sm" @click="addProcess">Add</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Process Name</th><th>Display Name</th><th></th></tr></thead>
+            <tbody><tr v-for="(disp, proc) in settings.processes" :key="proc">
+              <td style="font-family:monospace;font-size:12px">{{ proc }}</td>
+              <td>{{ disp }}</td>
+              <td><button class="btn btn-danger btn-sm" @click="removeProcess(proc)">Remove</button></td>
+            </tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card settings-section">
+        <h3>Tags</h3>
+        <p class="desc">Create custom tags to classify your time. <span style="color:var(--accent);font-weight:600">Work</span> and <span class="text-green">Indie</span> are built-in and cannot be modified.</p>
+        <div class="form-row">
+          <input type="text" v-model="newTag.name" placeholder="Tag name (e.g. Study)" style="flex:2">
+          <input type="color" v-model="newTag.color" style="width:40px;height:36px;border:none;background:none;cursor:pointer">
+          <button class="btn btn-primary btn-sm" @click="addTag">Add Tag</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Tag</th><th>Color</th><th></th></tr></thead>
+            <tbody><tr v-for="t in settings.tags" :key="t.id">
+              <td><span class="tag" :style="tagStyle(t.name)">{{ t.name }}</span></td>
+              <td><input type="color" :value="t.color" :disabled="t.is_system" @change="updateTagColor(t, $event.target.value)" style="width:30px;height:24px;border:none;background:none;cursor:pointer"></td>
+              <td><button v-if="!t.is_system" class="btn btn-danger btn-sm" @click="deleteTag(t)">Delete</button></td>
+            </tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card settings-section">
+        <h3>Keyword Tag Rules</h3>
+        <p class="desc">For multi-purpose apps, match window title keywords to override the default tag. Format: <code>keyword:Tag, keyword2:Tag2</code></p>
+        <div v-for="(rules, proc) in settings.tag_keyword_rules" :key="proc" class="form-row">
+          <label>{{ settings.processes[proc] || proc }}</label>
+          <input type="text" :value="rules.map(r => r.keyword + ':' + r.tag).join(', ')" @change="saveTagKeywordRules(proc, $event.target.value)" placeholder="keyword:Tag, keyword2:Tag2">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, reactive, onMounted, onUnmounted, nextTick, watch } = Vue;
+
+const ICONS = {
+  dashboard: '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" fill="currentColor"/>',
+  history: '<path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 1 1 7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.95 8.95 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" fill="currentColor"/>',
+  events: '<path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z" fill="currentColor"/>',
+  settings: '<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" fill="currentColor"/>',
+};
+
+createApp({
+  setup() {
+    const currentTab = ref('dashboard');
+    const navItems = [
+      { id: 'dashboard', label: 'Dashboard', icon: ICONS.dashboard },
+      { id: 'history', label: 'History', icon: ICONS.history },
+      { id: 'events', label: 'Event Log', icon: ICONS.events },
+      { id: 'efficiency', label: 'Efficiency', icon: '<path d="M3 17l6-6 4 4 8-8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 7h7v7" fill="none" stroke="currentColor" stroke-width="2"/>' },
+      { id: 'settings', label: 'Settings', icon: ICONS.settings },
+    ];
+
+    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, current: '--', current_fg: '', current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s' });
+    const hist = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, avg: '0s' }, trend: [], per_app: [], tag_trend: [], period_summary: [] });
+    const eff = reactive({ focus_sessions: [], switch_frequency: [], peak_hours: [], idle_time: '0s', idle_seconds: 0 });
+    const events = ref([]);
+    const eventFilter = ref('all');
+    const histDays = ref(7);
+    const settings = reactive({ processes: {}, idle_threshold: 300, auto_start_minimized: true, auto_start_with_windows: true, indie_keywords: {}, process_tags: {}, tag_keyword_rules: {}, tags: [] });
+    const newProc = reactive({ process_name: '', display_name: '' });
+    const newTag = reactive({ name: '', color: '#7dcfff' });
+
+    const pieChart = ref(null);
+    const trendChart = ref(null);
+    const timelineChart = ref(null);
+    const tagTrendChart = ref(null);
+    const periodChart = ref(null);
+    const peakHoursChart = ref(null);
+    const switchFreqChart = ref(null);
+    let pieInstance = null;
+    let trendInstance = null;
+    let timelineInstance = null;
+    let tagTrendInstance = null;
+    let periodInstance = null;
+    let peakHoursInstance = null;
+    let switchFreqInstance = null;
+
+    async function api(url, opts) {
+      const res = await fetch(url, opts);
+      return res.json();
+    }
+
+    async function loadDashboard() {
+      const d = await api('/api/dashboard');
+      Object.assign(dash, d);
+      nextTick(() => { updatePieChart(); updateTimelineChart(); });
+    }
+
+    async function loadHistory() {
+      const h = await api(`/api/history?days=${histDays.value}`);
+      Object.assign(hist, h);
+      nextTick(() => { updateTrendChart(); updateTagTrendChart(); updatePeriodChart(); });
+    }
+
+    async function loadEfficiency() {
+      const e = await api(`/api/efficiency?days=${histDays.value}`);
+      Object.assign(eff, e);
+      nextTick(() => { updatePeakHoursChart(); updateSwitchFreqChart(); });
+    }
+
+    async function loadEvents() {
+      events.value = await api(`/api/events?filter=${eventFilter.value}&limit=200`);
+    }
+
+    async function loadSettings() {
+      const s = await api('/api/settings');
+      Object.assign(settings, s);
+    }
+
+    async function saveSettings() {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+    }
+
+    async function addProcess() {
+      if (!newProc.process_name || !newProc.display_name) return;
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ add_process: { process_name: newProc.process_name, display_name: newProc.display_name } }) });
+      newProc.process_name = '';
+      newProc.display_name = '';
+      loadSettings();
+    }
+
+    async function removeProcess(proc) {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove_process: proc }) });
+      loadSettings();
+    }
+
+    async function saveIndieKeywords(proc, text) {
+      const kws = text.split(',').map(k => k.trim()).filter(k => k);
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ indie_keywords: { [proc]: kws } }) });
+    }
+
+    // ---- Tag helpers ----
+    function tagColor(tagName) {
+      const t = (settings.tags || []).find(t => t.name === tagName);
+      return t ? t.color : '#565f89';
+    }
+    function tagStyle(tagName) {
+      const c = tagColor(tagName);
+      return `background:${c}22;color:${c};border:1px solid ${c}44`;
+    }
+    function dotStyle(tagName) {
+      const c = tagColor(tagName);
+      if (tagName === 'Other') {
+        return `background:${c};animation:pulse 4s ease-in-out infinite`;
+      }
+      return `background:${c}`;
+    }
+
+    async function addTag() {
+      if (!newTag.name.trim()) return;
+      await api('/api/tags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newTag.name, color: newTag.color }) });
+      newTag.name = '';
+      loadSettings();
+    }
+
+    async function updateTagColor(tag, color) {
+      await api(`/api/tags/${tag.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ color }) });
+      loadSettings();
+    }
+
+    async function deleteTag(tag) {
+      await api(`/api/tags/${tag.id}`, { method: 'DELETE' });
+      loadSettings();
+    }
+
+    async function setProcessTag(proc, tag) {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ process_tags: { [proc]: tag } }) });
+      loadSettings();
+    }
+
+    async function changeAppTag(processName, displayName, tag) {
+      if (!processName) return;
+      await api('/api/app-tag', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ process_name: processName, display_name: displayName, tag }) });
+      loadDashboard();
+      loadSettings();
+    }
+
+    async function saveTagKeywordRules(proc, text) {
+      const parts = text.split(',').map(s => s.trim()).filter(s => s);
+      const rules = parts.map(p => {
+        const idx = p.lastIndexOf(':');
+        if (idx > 0) return { keyword: p.slice(0, idx).trim(), tag: p.slice(idx + 1).trim() };
+        return { keyword: p, tag: 'Other' };
+      });
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag_keyword_rules: { [proc]: rules } }) });
+    }
+
+    function updateTimelineChart() {
+      if (!timelineChart.value) return;
+      if (!timelineInstance) timelineInstance = echarts.init(timelineChart.value);
+      const tags = [...new Set(dash.timeline.map(t => t.tag))];
+      const hours = [...Array(24).keys()];
+      const series = tags.map(tagName => ({
+        name: tagName, type: 'bar', stack: 'total',
+        data: hours.map(h => {
+          const item = dash.timeline.find(t => t.hour === h && t.tag === tagName);
+          return item ? +(item.seconds / 60).toFixed(1) : 0;
+        }),
+        itemStyle: { color: tagColor(tagName), borderRadius: [3, 3, 0, 0] },
+      }));
+      timelineInstance.setOption({
+        tooltip: { trigger: 'axis', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 }, formatter: params => {
+          let s = `${params[0].axisValue}:00<br>`;
+          params.forEach(p => { if (p.value > 0) s += `${p.marker} ${p.seriesName}: ${p.value}m<br>`; });
+          return s;
+        }},
+        legend: { data: tags, bottom: 0, textStyle: { color: '#9aa5ce', fontSize: 11 }, itemWidth: 12, itemHeight: 3, itemGap: 12 },
+        grid: { left: 45, right: 16, top: 16, bottom: 36 },
+        xAxis: { type: 'category', data: hours.map(h => h + ''), axisLine: { lineStyle: { color: '#414868' } }, axisLabel: { color: '#565f89', fontSize: 11 }, axisTick: { show: false } },
+        yAxis: { type: 'value', name: 'min', nameTextStyle: { color: '#565f89', fontSize: 11 }, axisLine: { show: false }, axisLabel: { color: '#565f89', fontSize: 11 }, splitLine: { lineStyle: { color: 'rgba(42,46,63,.4)', type: 'dashed' } } },
+        series,
+      }, true);
+    }
+
+    function exportCsv() {
+      if (histDays.value === 'all') {
+        window.open(`/api/export`, '_blank');
+      } else {
+        const end = new Date().toISOString().slice(0, 10);
+        const start = new Date(Date.now() - (histDays.value - 1) * 86400000).toISOString().slice(0, 10);
+        window.open(`/api/export?start=${start}&end=${end}`, '_blank');
+      }
+    }
+
+    const PIE_COLORS = ['#7aa2f7', '#9ece6a', '#e0af68', '#f7768e', '#7dcfff', '#bb9af7', '#ff9e64', '#73daca', '#c0caf5', '#565f89'];
+
+    function updatePieChart() {
+      if (!pieChart.value) return;
+      if (!pieInstance) pieInstance = echarts.init(pieChart.value);
+      const data = dash.pie.map((d, i) => ({ name: d.name, value: d.value, itemStyle: { color: PIE_COLORS[i % PIE_COLORS.length] } }));
+      pieInstance.setOption({
+        tooltip: { trigger: 'item', formatter: '{b}: {c}s ({d}%)', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 }, padding: [8, 12] },
+        series: [{
+          type: 'pie', radius: ['45%', '72%'], center: ['50%', '52%'],
+          label: { color: '#9aa5ce', fontSize: 11, formatter: '{b}\n{d}%', fontWeight: 500 },
+          labelLine: { lineStyle: { color: '#414868' }, length: 12, length2: 8 },
+          itemStyle: { borderColor: '#1f2335', borderWidth: 2, borderRadius: 4 },
+          emphasis: { itemStyle: { shadowBlur: 12, shadowColor: 'rgba(0,0,0,.3)' }, label: { fontSize: 13, fontWeight: 700 } },
+          data,
+        }],
+      });
+    }
+
+    function updateTrendChart() {
+      if (!trendChart.value) return;
+      if (!trendInstance) trendInstance = echarts.init(trendChart.value);
+      trendInstance.setOption({
+        tooltip: { trigger: 'axis', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 }, padding: [8, 12] },
+        legend: {
+          data: ['Total', 'Work', 'Indie'],
+          bottom: 0,
+          textStyle: { color: '#9aa5ce', fontSize: 12 },
+          itemWidth: 16, itemHeight: 3, itemGap: 20,
+        },
+        grid: { left: 55, right: 24, top: 24, bottom: 40 },
+        xAxis: { type: 'category', data: hist.trend.map(t => t.date), axisLine: { lineStyle: { color: '#414868' } }, axisLabel: { color: '#565f89', fontSize: 12 }, axisTick: { show: false } },
+        yAxis: { type: 'value', name: 'Hours', nameTextStyle: { color: '#565f89', fontSize: 12 }, axisLine: { show: false }, axisLabel: { color: '#565f89', fontSize: 12 }, splitLine: { lineStyle: { color: 'rgba(42,46,63,.4)', type: 'dashed' } } },
+        series: [
+          {
+            name: 'Total', type: 'line', data: hist.trend.map(t => t.hours), smooth: true, symbol: 'circle', symbolSize: 6,
+            lineStyle: { color: '#e0af68', width: 2.5 },
+            itemStyle: { color: '#e0af68', borderColor: '#1f2335', borderWidth: 2 },
+            areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(224,175,104,.2)' }, { offset: 1, color: 'rgba(224,175,104,0)' }] } },
+          },
+          {
+            name: 'Work', type: 'line', data: hist.trend.map(t => t.work_hours), smooth: true, symbol: 'circle', symbolSize: 6,
+            lineStyle: { color: '#7aa2f7', width: 2.5 },
+            itemStyle: { color: '#7aa2f7', borderColor: '#1f2335', borderWidth: 2 },
+            areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(122,162,247,.2)' }, { offset: 1, color: 'rgba(122,162,247,0)' }] } },
+          },
+          {
+            name: 'Indie', type: 'line', data: hist.trend.map(t => t.indie_hours), smooth: true, symbol: 'circle', symbolSize: 6,
+            lineStyle: { color: '#9ece6a', width: 2.5 },
+            itemStyle: { color: '#9ece6a', borderColor: '#1f2335', borderWidth: 2 },
+            areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(158,206,106,.2)' }, { offset: 1, color: 'rgba(158,206,106,0)' }] } },
+          },
+        ],
+      });
+    }
+
+    function updateTagTrendChart() {
+      if (!tagTrendChart.value) return;
+      if (!tagTrendInstance) tagTrendInstance = echarts.init(tagTrendChart.value);
+      const tags = [...new Set(hist.tag_trend.map(t => t.tag))];
+      const dates = [...new Set(hist.tag_trend.map(t => t.date))].sort();
+      const series = tags.map(tagName => ({
+        name: tagName, type: 'line', stack: 'total', smooth: true, symbol: 'circle', symbolSize: 5,
+        data: dates.map(d => {
+          const item = hist.tag_trend.find(t => t.date === d && t.tag === tagName);
+          return item ? +(item.seconds / 3600).toFixed(2) : 0;
+        }),
+        lineStyle: { color: tagColor(tagName), width: 2 },
+        itemStyle: { color: tagColor(tagName) },
+        areaStyle: { opacity: 0.15 },
+      }));
+      tagTrendInstance.setOption({
+        tooltip: { trigger: 'axis', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 } },
+        legend: { data: tags, bottom: 0, textStyle: { color: '#9aa5ce', fontSize: 11 }, itemWidth: 12, itemHeight: 3, itemGap: 12 },
+        grid: { left: 50, right: 20, top: 20, bottom: 40 },
+        xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#414868' } }, axisLabel: { color: '#565f89', fontSize: 11 }, axisTick: { show: false } },
+        yAxis: { type: 'value', name: 'Hours', nameTextStyle: { color: '#565f89', fontSize: 11 }, axisLine: { show: false }, axisLabel: { color: '#565f89', fontSize: 11 }, splitLine: { lineStyle: { color: 'rgba(42,46,63,.4)', type: 'dashed' } } },
+        series,
+      }, true);
+    }
+
+    function updatePeriodChart() {
+      if (!periodChart.value) return;
+      if (!periodInstance) periodInstance = echarts.init(periodChart.value);
+      const tags = [...new Set(hist.period_summary.map(t => t.tag))];
+      const periods = [...new Set(hist.period_summary.map(t => t.period))].sort();
+      const series = tags.map(tagName => ({
+        name: tagName, type: 'bar', stack: 'total',
+        data: periods.map(p => {
+          const item = hist.period_summary.find(t => t.period === p && t.tag === tagName);
+          return item ? +(item.seconds / 3600).toFixed(2) : 0;
+        }),
+        itemStyle: { color: tagColor(tagName), borderRadius: [3, 3, 0, 0] },
+      }));
+      periodInstance.setOption({
+        tooltip: { trigger: 'axis', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 } },
+        legend: { data: tags, bottom: 0, textStyle: { color: '#9aa5ce', fontSize: 11 }, itemWidth: 12, itemHeight: 3, itemGap: 12 },
+        grid: { left: 50, right: 20, top: 20, bottom: 40 },
+        xAxis: { type: 'category', data: periods, axisLine: { lineStyle: { color: '#414868' } }, axisLabel: { color: '#565f89', fontSize: 11 }, axisTick: { show: false } },
+        yAxis: { type: 'value', name: 'Hours', nameTextStyle: { color: '#565f89', fontSize: 11 }, axisLine: { show: false }, axisLabel: { color: '#565f89', fontSize: 11 }, splitLine: { lineStyle: { color: 'rgba(42,46,63,.4)', type: 'dashed' } } },
+        series,
+      }, true);
+    }
+
+    function updatePeakHoursChart() {
+      if (!peakHoursChart.value) return;
+      if (!peakHoursInstance) peakHoursInstance = echarts.init(peakHoursChart.value);
+      peakHoursInstance.setOption({
+        tooltip: { trigger: 'axis', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 }, formatter: params => `${params[0].axisValue}:00<br>${params[0].marker} Avg: ${(params[0].value/60).toFixed(1)}m` },
+        grid: { left: 50, right: 20, top: 20, bottom: 30 },
+        xAxis: { type: 'category', data: eff.peak_hours.map(h => h.hour + ''), axisLine: { lineStyle: { color: '#414868' } }, axisLabel: { color: '#565f89', fontSize: 11 }, axisTick: { show: false } },
+        yAxis: { type: 'value', name: 'min', nameTextStyle: { color: '#565f89', fontSize: 11 }, axisLine: { show: false }, axisLabel: { color: '#565f89', fontSize: 11 }, splitLine: { lineStyle: { color: 'rgba(42,46,63,.4)', type: 'dashed' } } },
+        series: [{ type: 'bar', data: eff.peak_hours.map(h => +(h.avg_seconds / 60).toFixed(1)), itemStyle: { color: '#7dcfff', borderRadius: [3, 3, 0, 0] } }],
+      }, true);
+    }
+
+    function updateSwitchFreqChart() {
+      if (!switchFreqChart.value) return;
+      if (!switchFreqInstance) switchFreqInstance = echarts.init(switchFreqChart.value);
+      const hours = [...Array(24).keys()];
+      switchFreqInstance.setOption({
+        tooltip: { trigger: 'axis', backgroundColor: '#1f2335', borderColor: '#2a2e3f', borderWidth: 1, textStyle: { color: '#c0caf5', fontSize: 13 }, formatter: params => `${params[0].axisValue}:00<br>${params[0].marker} Switches: ${params[0].value}` },
+        grid: { left: 50, right: 20, top: 20, bottom: 30 },
+        xAxis: { type: 'category', data: hours.map(h => h + ''), axisLine: { lineStyle: { color: '#414868' } }, axisLabel: { color: '#565f89', fontSize: 11 }, axisTick: { show: false } },
+        yAxis: { type: 'value', name: 'count', nameTextStyle: { color: '#565f89', fontSize: 11 }, axisLine: { show: false }, axisLabel: { color: '#565f89', fontSize: 11 }, splitLine: { lineStyle: { color: 'rgba(42,46,63,.4)', type: 'dashed' } } },
+        series: [{ type: 'bar', data: hours.map(h => { const item = eff.switch_frequency.find(s => s.hour === h); return item ? item.switches : 0; }), itemStyle: { color: '#f7768e', borderRadius: [3, 3, 0, 0] } }],
+      }, true);
+    }
+
+    let dashTimer, eventTimer;
+
+    onMounted(() => {
+      loadDashboard();
+      loadHistory();
+      loadEvents();
+      loadSettings();
+      loadEfficiency();
+      dashTimer = setInterval(loadDashboard, 5000);
+      eventTimer = setInterval(loadEvents, 3000);
+    });
+
+    onUnmounted(() => {
+      clearInterval(dashTimer);
+      clearInterval(eventTimer);
+      [pieInstance, trendInstance, timelineInstance, tagTrendInstance, periodInstance, peakHoursInstance, switchFreqInstance].forEach(i => { if (i) i.dispose(); });
+    });
+
+    watch(currentTab, (tab) => {
+      if (tab === 'dashboard') nextTick(() => { updatePieChart(); updateTimelineChart(); if (pieInstance) pieInstance.resize(); if (timelineInstance) timelineInstance.resize(); });
+      if (tab === 'history') { loadHistory(); nextTick(() => { if (trendInstance) trendInstance.resize(); if (tagTrendInstance) tagTrendInstance.resize(); if (periodInstance) periodInstance.resize(); }); }
+      if (tab === 'efficiency') { loadEfficiency(); nextTick(() => { if (peakHoursInstance) peakHoursInstance.resize(); if (switchFreqInstance) switchFreqInstance.resize(); }); }
+    });
+
+    return {
+      currentTab, navItems, dash, hist, eff, events, eventFilter, histDays, settings, newProc, newTag,
+      pieChart, trendChart, timelineChart, tagTrendChart, periodChart, peakHoursChart, switchFreqChart,
+      loadHistory, loadEvents, saveSettings, addProcess, removeProcess, saveIndieKeywords, exportCsv,
+      addTag, updateTagColor, deleteTag, setProcessTag, saveTagKeywordRules, changeAppTag,
+      tagColor, tagStyle, dotStyle,
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
