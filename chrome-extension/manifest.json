@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "WorkTime Tracker URL Reporter",
+  "version": "1.0",
+  "description": "Reports the active tab URL to WorkTime Tracker for Work/Indie classification.",
+  "permissions": ["tabs", "activeTab"],
+  "host_permissions": ["http://127.0.0.1:17891/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "WorkTime Tracker URL Reporter"
+  }
+}

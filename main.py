@@ -9,6 +9,7 @@ import sys
 import threading
 
 from config import AppConfig
+from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.codex_event_server import CodexEventServer
 from tracker.time_recorder import TimeRecorder
@@ -69,10 +70,12 @@ def main():
     codex_server = CodexEventServer(codex_manager)
     codex_server.start()
 
-    engine = TrackingEngine(config, recorder, codex_manager)
+    chrome_url_cache = ChromeUrlCache(recorder)
+
+    engine = TrackingEngine(config, recorder, codex_manager, chrome_url_cache)
     engine.start()
 
-    web_server = WebServer(config, recorder, engine, codex_manager)
+    web_server = WebServer(config, recorder, engine, codex_manager, chrome_url_cache)
     web_server.start()
 
     logger.info("WorkTime Tracker started. Tracking: %s", engine.is_running())

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS time_segments (
     end_time    TEXT    NOT NULL,
     process_name TEXT   NOT NULL,
     display_name TEXT   NOT NULL,
+    project     TEXT    NOT NULL DEFAULT '',
     tag         TEXT    NOT NULL DEFAULT 'Other',
     seconds     REAL    NOT NULL DEFAULT 0
 );
@@ -83,6 +84,13 @@ CREATE TABLE IF NOT EXISTS codex_time_records (
     updated_at  TEXT    NOT NULL,
     UNIQUE(date, project)
 );
+
+CREATE TABLE IF NOT EXISTS chrome_url_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    url         TEXT    NOT NULL,
+    domain      TEXT    NOT NULL DEFAULT '',
+    received_at TEXT    NOT NULL
+);
 """
 
 
@@ -106,6 +114,7 @@ class TimeRecorder:
             conn.execute(_CREATE_SEGMENTS_SQL)
             self._migrate_add_project(conn)
             self._migrate_add_tag(conn)
+            self._migrate_add_segment_project(conn)
             self._seed_default_tags(conn)
             self._migrate_tag_from_display_name(conn)
             conn.commit()
@@ -127,6 +136,14 @@ class TimeRecorder:
         col_names = [c["name"] for c in cols]
         if "tag" not in col_names:
             conn.execute("ALTER TABLE time_records ADD COLUMN tag TEXT NOT NULL DEFAULT 'Other'")
+
+    @staticmethod
+    def _migrate_add_segment_project(conn):
+        """Add project identity to the canonical segment table."""
+        cols = conn.execute("PRAGMA table_info(time_segments)").fetchall()
+        col_names = [c["name"] for c in cols]
+        if "project" not in col_names:
+            conn.execute("ALTER TABLE time_segments ADD COLUMN project TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _seed_default_tags(conn):
@@ -212,6 +229,50 @@ class TimeRecorder:
         finally:
             conn.close()
 
+    @classmethod
+    def update_app_tag(
+        cls,
+        process_name: str,
+        display_name: str,
+        project: str,
+        new_tag: str,
+    ):
+        """Reclassify one App Breakdown identity in canonical and legacy data.
+
+        Project is preferred when available. The display-name fallback also
+        catches segments recorded before the project column was introduced.
+        """
+        conn = cls._conn()
+        try:
+            if project:
+                segment_where = (
+                    "process_name = ? COLLATE NOCASE "
+                    "AND (project = ? COLLATE NOCASE OR display_name = ?)"
+                )
+                segment_args = (process_name, project, display_name)
+                record_where = (
+                    "process_name = ? COLLATE NOCASE "
+                    "AND (project = ? COLLATE NOCASE OR display_name = ?)"
+                )
+                record_args = segment_args
+            else:
+                segment_where = "process_name = ? COLLATE NOCASE AND display_name = ?"
+                segment_args = (process_name, display_name)
+                record_where = segment_where
+                record_args = segment_args
+
+            conn.execute(
+                f"UPDATE time_segments SET tag = ? WHERE {segment_where}",
+                (new_tag, *segment_args),
+            )
+            conn.execute(
+                f"UPDATE time_records SET tag = ? WHERE {record_where}",
+                (new_tag, *record_args),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------ #
     #  Write                                                              #
     # ------------------------------------------------------------------ #
@@ -233,17 +294,19 @@ class TimeRecorder:
                 DO UPDATE SET
                     seconds    = seconds + excluded.seconds,
                     display_name = excluded.display_name,
+                    tag         = excluded.tag,
                     updated_at = excluded.updated_at
                 """,
                 (today, process_name, display_name, project, tag, seconds, now_iso),
             )
-            # Insert segment for timeline tracking
+            # time_segments is the canonical source for dashboard, history and export.
             conn.execute(
                 """
-                INSERT INTO time_segments (date, start_time, end_time, process_name, display_name, tag, seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO time_segments
+                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (today, start_iso, now_iso, process_name, display_name, tag, seconds),
+                (today, start_iso, now_iso, process_name, display_name, project, tag, seconds),
             )
             conn.commit()
         finally:
@@ -261,9 +324,9 @@ class TimeRecorder:
             rows = conn.execute(
                 """
                 SELECT display_name, process_name, project, tag, SUM(seconds) AS seconds
-                FROM time_records
-                WHERE date = ?
-                GROUP BY process_name, project
+                FROM time_segments
+                WHERE date = ? AND tag != 'Idle'
+                GROUP BY display_name, process_name, project, tag
                 ORDER BY seconds DESC
                 """,
                 (today,),
@@ -273,20 +336,30 @@ class TimeRecorder:
         return [dict(r) for r in rows]
 
     def get_today_total(self) -> float:
-        return sum(r["seconds"] for r in self.get_today_summary())
+        today = date.today().isoformat()
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(seconds), 0) AS total FROM time_segments WHERE date = ? AND tag != 'Idle'",
+                (today,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row["total"] if row else 0.0
 
     def get_range_summary(
         self, start: date, end: date
     ) -> Dict[str, List[Tuple[str, float]]]:
-        """Return {display_name: [(date_iso, seconds), ...]} for [start, end]."""
+        """Return canonical segment totals grouped by app and date."""
         conn = self._conn()
         try:
             rows = conn.execute(
                 """
-                SELECT date, display_name, project, seconds
-                FROM time_records
-                WHERE date >= ? AND date <= ?
-                ORDER BY date
+                SELECT date, display_name, SUM(seconds) AS seconds
+                FROM time_segments
+                WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                GROUP BY date, display_name
+                ORDER BY date, display_name
                 """,
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
@@ -299,6 +372,37 @@ class TimeRecorder:
             result.setdefault(name, []).append((r["date"], r["seconds"]))
         return result
 
+    def get_range_app_breakdown(self, start: date, end: date) -> List[Dict]:
+        """Return per-app/project/tag totals from canonical segments."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT display_name, process_name, project, tag,
+                       SUM(seconds) AS seconds,
+                       COUNT(DISTINCT date) AS days_active
+                FROM time_segments
+                WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                GROUP BY display_name, process_name, project, tag
+                ORDER BY seconds DESC
+                """,
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def get_first_record_date(self) -> Optional[str]:
+        """Return the first date available in the canonical segment table."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT MIN(date) AS date FROM time_segments WHERE tag != 'Idle'"
+            ).fetchone()
+        finally:
+            conn.close()
+        return row["date"] if row and row["date"] else None
+
     def get_daily_totals(self, start: date, end: date) -> List[Tuple[str, float]]:
         """Return [(date_iso, total_seconds)] for each day in range."""
         conn = self._conn()
@@ -306,8 +410,8 @@ class TimeRecorder:
             rows = conn.execute(
                 """
                 SELECT date, SUM(seconds) AS total
-                FROM time_records
-                WHERE date >= ? AND date <= ?
+                FROM time_segments
+                WHERE date >= ? AND date <= ? AND tag != 'Idle'
                 GROUP BY date
                 ORDER BY date
                 """,
@@ -322,7 +426,7 @@ class TimeRecorder:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT date, tag, SUM(seconds) AS seconds FROM time_records WHERE date >= ? AND date <= ? GROUP BY date, tag ORDER BY date",
+                "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments WHERE date >= ? AND date <= ? AND tag != 'Idle' GROUP BY date, tag ORDER BY date",
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
         finally:
@@ -353,6 +457,22 @@ class TimeRecorder:
         finally:
             conn.close()
 
+    def record_chrome_url_event(self, url: str, domain: str = ""):
+        """Persist a Chrome URL report event for the Event Log."""
+        now = datetime.now().isoformat(timespec="seconds")
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO chrome_url_events (url, domain, received_at)
+                VALUES (?, ?, ?)
+                """,
+                (url, domain, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def add_codex_time(self, project: str, project_name: str, seconds: float, tag: str = "Work"):
         """Accumulate Codex project time for today."""
         today = date.today().isoformat()
@@ -374,13 +494,14 @@ class TimeRecorder:
                 """,
                 (today, project, project_name, seconds, now_iso),
             )
-            # Insert segment for timeline tracking
+            # Insert the same sample into the canonical segment table.
             conn.execute(
                 """
-                INSERT INTO time_segments (date, start_time, end_time, process_name, display_name, tag, seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO time_segments
+                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (today, start_iso, now_iso, "codex.exe", project_name, tag, seconds),
+                (today, start_iso, now_iso, "codex.exe", project_name, project, tag, seconds),
             )
             conn.commit()
         finally:
@@ -397,10 +518,11 @@ class TimeRecorder:
         try:
             conn.execute(
                 """
-                INSERT INTO time_segments (date, start_time, end_time, process_name, display_name, tag, seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO time_segments
+                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (today, start_iso, now_iso, "idle", "Idle", "Idle", seconds),
+                (today, start_iso, now_iso, "idle", "Idle", "", "Idle", seconds),
             )
             conn.commit()
         finally:
@@ -465,7 +587,7 @@ class TimeRecorder:
     def update_tag(self, tag_id: int, name: str = None, color: str = None) -> bool:
         conn = self._conn()
         try:
-            tag = conn.execute("SELECT is_system FROM tags WHERE id = ?", (tag_id,)).fetchone()
+            tag = conn.execute("SELECT name, is_system FROM tags WHERE id = ?", (tag_id,)).fetchone()
             if not tag:
                 return False
             is_system = tag["is_system"]
@@ -481,6 +603,9 @@ class TimeRecorder:
                 return False
             params.append(tag_id)
             conn.execute(f"UPDATE tags SET {', '.join(sets)} WHERE id = ?", params)
+            if name is not None and not is_system and name != tag["name"]:
+                conn.execute("UPDATE time_records SET tag = ? WHERE tag = ?", (name, tag["name"]))
+                conn.execute("UPDATE time_segments SET tag = ? WHERE tag = ?", (name, tag["name"]))
             conn.commit()
         finally:
             conn.close()
@@ -494,6 +619,7 @@ class TimeRecorder:
                 return False
             # Reassign records to Other
             conn.execute("UPDATE time_records SET tag = 'Other' WHERE tag = ?", (tag["name"],))
+            conn.execute("UPDATE time_segments SET tag = 'Other' WHERE tag = ?", (tag["name"],))
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
             conn.commit()
         finally:
@@ -549,13 +675,14 @@ class TimeRecorder:
         return [dict(r) for r in rows]
 
     def get_today_app_breakdown(self) -> List[Dict]:
-        """Return [{display_name, process_name, tag, seconds}] for today from time_segments."""
+        """Return app rows with a stable project identity for quick tag edits."""
         today = date.today().isoformat()
         conn = self._conn()
         try:
             rows = conn.execute(
                 """
-                SELECT display_name, process_name, tag, SUM(seconds) AS seconds
+                SELECT display_name, process_name, MAX(project) AS project,
+                       tag, SUM(seconds) AS seconds
                 FROM time_segments
                 WHERE date = ? AND tag != 'Idle'
                 GROUP BY process_name, display_name, tag
@@ -665,7 +792,7 @@ class TimeRecorder:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT date, tag, SUM(seconds) AS seconds FROM time_records WHERE date >= ? AND date <= ? GROUP BY date, tag ORDER BY date",
+                "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments WHERE date >= ? AND date <= ? AND tag != 'Idle' GROUP BY date, tag ORDER BY date",
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
         finally:
@@ -692,7 +819,7 @@ class TimeRecorder:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT date, tag, SUM(seconds) AS seconds FROM time_records WHERE date >= ? AND date <= ? GROUP BY date, tag ORDER BY date",
+                "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments WHERE date >= ? AND date <= ? AND tag != 'Idle' GROUP BY date, tag ORDER BY date",
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
         finally:
@@ -704,15 +831,17 @@ class TimeRecorder:
     # ------------------------------------------------------------------ #
 
     def export_csv(self, file_path: str, start: Optional[date] = None, end: Optional[date] = None):
-        """Export records to CSV. If start/end omitted, exports everything."""
+        """Export canonical active-time segments aggregated by app/project/tag."""
         conn = self._conn()
         try:
             if start and end:
                 rows = conn.execute(
                     """
-                    SELECT date, display_name, process_name, project, tag, seconds, updated_at
-                    FROM time_records
-                    WHERE date >= ? AND date <= ?
+                    SELECT date, display_name, process_name, project, tag,
+                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
+                    FROM time_segments
+                    WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                    GROUP BY date, display_name, process_name, project, tag
                     ORDER BY date, seconds DESC
                     """,
                     (start.isoformat(), end.isoformat()),
@@ -720,8 +849,11 @@ class TimeRecorder:
             else:
                 rows = conn.execute(
                     """
-                    SELECT date, display_name, process_name, project, tag, seconds, updated_at
-                    FROM time_records
+                    SELECT date, display_name, process_name, project, tag,
+                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
+                    FROM time_segments
+                    WHERE tag != 'Idle'
+                    GROUP BY date, display_name, process_name, project, tag
                     ORDER BY date, seconds DESC
                     """
                 ).fetchall()

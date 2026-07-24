@@ -1,5 +1,4 @@
-"""Tests for Codex activity tracking: heartbeat, dedup, project switch,
-idle timeout, gap cap, concurrent sessions, invalid input."""
+"""Tests for the current Codex model: hooks select a project; visibility adds time."""
 
 import os
 import tempfile
@@ -7,35 +6,23 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# We need to set DB_FILE before importing TimeRecorder
 import config
-import tracker.time_recorder as _tr_module
-config.DB_FILE = Path(tempfile.mktemp(suffix=".db"))
-_tr_module.DB_FILE = config.DB_FILE
-
+import tracker.time_recorder as time_recorder_module
+from tracker.codex_activity_manager import CodexActivityManager
 from tracker.time_recorder import TimeRecorder
-from tracker.codex_activity_manager import (
-    CodexActivityManager,
-    IDLE_TIMEOUT_SECONDS,
-    MAX_GAP_SECONDS,
-)
-
-
-def ts(seconds_from_base: float) -> datetime:
-    """Helper: create UTC datetime from base + offset."""
-    base = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
-    return base + timedelta(seconds=seconds_from_base)
 
 
 class TestCodexActivity(unittest.TestCase):
 
     def setUp(self):
-        # Fresh DB and manager for each test
         self._db_path = tempfile.mktemp(suffix=".db")
         config.DB_FILE = Path(self._db_path)
-        _tr_module.DB_FILE = config.DB_FILE
+        time_recorder_module.DB_FILE = config.DB_FILE
         self.recorder = TimeRecorder()
-        self.manager = CodexActivityManager(self.recorder)
+        self.manager = CodexActivityManager(
+            self.recorder,
+            indie_keywords=["P1-c", "Assets"],
+        )
 
     def tearDown(self):
         try:
@@ -43,198 +30,82 @@ class TestCodexActivity(unittest.TestCase):
         except OSError:
             pass
 
-    def _send(self, event, session_id, project, observed_at):
-        return self.manager.handle_event(event, session_id, project, observed_at)
+    @staticmethod
+    def _now(offset_seconds=0):
+        return datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
 
-    # ------------------------------------------------------------------ #
-    #  1. Normal heartbeat accumulates time                              #
-    # ------------------------------------------------------------------ #
+    def test_hook_selects_project_but_does_not_add_time(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        result = self.manager.handle_event(
+            "SessionStart", "s1", project, self._now(-2)
+        )
 
-    def test_normal_heartbeat(self):
-        proj = "D:\\Projects\\MyGame"
-        r1 = self._send("SessionStart", "s1", proj, ts(0))
-        self.assertEqual(r1["status"], "ok")
-        self.assertAlmostEqual(r1["added_seconds"], 0.0, places=1)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["added_seconds"], 0)
+        self.assertEqual(self.recorder.get_codex_today_total(), 0)
+        self.assertEqual(
+            self.manager.get_current_active_project()["project_name"],
+            "Assets (Indie)",
+        )
 
-        r2 = self._send("PreToolUse", "s1", proj, ts(30))
-        self.assertEqual(r2["status"], "ok")
-        self.assertAlmostEqual(r2["added_seconds"], 30.0, places=1)
+    def test_visible_codex_time_is_recorded_explicitly(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        self.manager.handle_event("PreToolUse", "s1", project, self._now(-1))
+        active = self.manager.get_current_active_project()
 
-        r3 = self._send("UserPromptSubmit", "s1", proj, ts(60))
-        self.assertEqual(r3["status"], "ok")
-        self.assertAlmostEqual(r3["added_seconds"], 30.0, places=1)
+        self.recorder.add_codex_time(
+            active["project"], active["project_name"], 12.5, "Indie"
+        )
 
         summary = self.recorder.get_codex_today_summary()
         self.assertEqual(len(summary), 1)
-        self.assertAlmostEqual(summary[0]["seconds"], 60.0, places=1)
+        self.assertAlmostEqual(summary[0]["seconds"], 12.5)
+        tag_totals = self.recorder.get_today_tag_distribution()
+        self.assertEqual(tag_totals[0]["tag"], "Indie")
+        self.assertAlmostEqual(tag_totals[0]["seconds"], 12.5)
 
-    # ------------------------------------------------------------------ #
-    #  2. Duplicate events are idempotent                                #
-    # ------------------------------------------------------------------ #
+    def test_duplicate_event_is_idempotent(self):
+        project = r"D:\Projects\WorkApp"
+        observed_at = self._now(-1)
+        first = self.manager.handle_event("PreToolUse", "s1", project, observed_at)
+        duplicate = self.manager.handle_event("PreToolUse", "s1", project, observed_at)
 
-    def test_duplicate_event(self):
-        proj = "D:\\Projects\\MyGame"
-        r1 = self._send("PreToolUse", "s1", proj, ts(0))
-        self.assertEqual(r1["status"], "ok")
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(duplicate["status"], "duplicate")
 
-        r2 = self._send("PreToolUse", "s1", proj, ts(0))
-        self.assertEqual(r2["status"], "duplicate")
+    def test_stop_deactivates_single_codex_project(self):
+        project = r"D:\Projects\WorkApp"
+        self.manager.handle_event("SessionStart", "s1", project, self._now(-2))
+        result = self.manager.handle_event("Stop", "s1", project, self._now(-1))
 
-        # No time should have been added by the duplicate
-        summary = self.recorder.get_codex_today_summary()
-        # First heartbeat with no prior heartbeat adds 0s, so summary may be empty
-        total = sum(s["seconds"] for s in summary)
-        self.assertAlmostEqual(total, 0.0, places=1)
+        self.assertEqual(result["status"], "stopped")
+        self.assertIsNone(self.manager.get_current_active_project())
 
-    # ------------------------------------------------------------------ #
-    #  3. Project switch within same session                             #
-    # ------------------------------------------------------------------ #
+    def test_most_recent_project_is_current(self):
+        work = r"D:\Projects\WorkApp"
+        indie = r"D:\Data\unity\P1-c\Assets"
+        self.manager.handle_event("PreToolUse", "work", work, self._now(-20))
+        self.manager.handle_event("PreToolUse", "indie", indie, self._now(-5))
 
-    def test_project_switch(self):
-        proj_a = "D:\\Projects\\ProjectA"
-        proj_b = "D:\\Projects\\ProjectB"
+        current = self.manager.get_current_active_project()
+        self.assertEqual(current["project"], indie)
+        self.assertEqual(current["project_name"], "Assets (Indie)")
 
-        self._send("SessionStart", "s1", proj_a, ts(0))
-        self._send("PreToolUse", "s1", proj_a, ts(30))  # +30s for A
-
-        # Switch to project B
-        r = self._send("PreToolUse", "s1", proj_b, ts(60))
-        self.assertEqual(r["status"], "ok")
-        self.assertEqual(r["project_name"], "ProjectB")
-        # Gap from project A's last heartbeat (30s ago) but for project B
-        # there's no previous heartbeat, so added_seconds should be 0
-        self.assertAlmostEqual(r["added_seconds"], 0.0, places=1)
-
-        self._send("PreToolUse", "s1", proj_b, ts(90))  # +30s for B
-
-        summary = self.recorder.get_codex_today_summary()
-        by_name = {s["project_name"]: s["seconds"] for s in summary}
-        self.assertAlmostEqual(by_name["ProjectA"], 30.0, places=1)
-        self.assertAlmostEqual(by_name["ProjectB"], 30.0, places=1)
-
-    # ------------------------------------------------------------------ #
-    #  4. Idle timeout: gap > 5 min → no time added                      #
-    # ------------------------------------------------------------------ #
-
-    def test_idle_timeout(self):
-        proj = "D:\\Projects\\MyGame"
-        self._send("SessionStart", "s1", proj, ts(0))
-        self._send("PreToolUse", "s1", proj, ts(30))  # +30s
-
-        # Gap of 6 minutes (> IDLE_TIMEOUT_SECONDS=300)
-        r = self._send("PreToolUse", "s1", proj, ts(30 + 360))
-        self.assertEqual(r["status"], "ok")
-        self.assertAlmostEqual(r["added_seconds"], 0.0, places=1)
-
-        summary = self.recorder.get_codex_today_summary()
-        self.assertAlmostEqual(summary[0]["seconds"], 30.0, places=1)
-
-    # ------------------------------------------------------------------ #
-    #  5. Gap cap: gap between heartbeats capped at 2 min                #
-    # ------------------------------------------------------------------ #
-
-    def test_gap_cap(self):
-        proj = "D:\\Projects\\MyGame"
-        self._send("SessionStart", "s1", proj, ts(0))
-        self._send("PreToolUse", "s1", proj, ts(30))  # +30s
-
-        # Gap of 4 minutes (240s) — within idle timeout but > MAX_GAP
-        r = self._send("PreToolUse", "s1", proj, ts(30 + 240))
-        self.assertEqual(r["status"], "ok")
-        self.assertAlmostEqual(r["added_seconds"], MAX_GAP_SECONDS, places=1)
-
-        summary = self.recorder.get_codex_today_summary()
-        # 30 + 120 = 150
-        self.assertAlmostEqual(summary[0]["seconds"], 30 + MAX_GAP_SECONDS, places=1)
-
-    # ------------------------------------------------------------------ #
-    #  6. Concurrent sessions on same project don't double-count         #
-    # ------------------------------------------------------------------ #
-
-    def test_concurrent_sessions_same_project(self):
-        proj = "D:\\Projects\\MyGame"
-
-        # Session 1 starts
-        self._send("SessionStart", "s1", proj, ts(0))
-
-        # Session 2 starts 10s later (same project)
-        r2 = self._send("SessionStart", "s2", proj, ts(10))
-        # Gap from project's last heartbeat (s1 at t=0) is 10s
-        # But s2 is a new session — it should still use project-level last_ts
-        self.assertAlmostEqual(r2["added_seconds"], 10.0, places=1)
-
-        # Both sessions send heartbeats at t=30
-        r3 = self._send("PreToolUse", "s1", proj, ts(30))
-        self.assertAlmostEqual(r3["added_seconds"], 20.0, places=1)  # gap from s2's t=10
-
-        r4 = self._send("PreToolUse", "s2", proj, ts(35))
-        # Gap from project's last heartbeat (s1 at t=30) is 5s
-        self.assertAlmostEqual(r4["added_seconds"], 5.0, places=1)
-
-        # Total should be 10 + 20 + 5 = 35, not doubled
-        summary = self.recorder.get_codex_today_summary()
-        self.assertAlmostEqual(summary[0]["seconds"], 35.0, places=1)
-
-    # ------------------------------------------------------------------ #
-    #  7. Stop event does not add extra time                             #
-    # ------------------------------------------------------------------ #
-
-    def test_stop_no_extra_time(self):
-        proj = "D:\\Projects\\MyGame"
-        self._send("SessionStart", "s1", proj, ts(0))
-        self._send("PreToolUse", "s1", proj, ts(30))  # +30s
-
-        r = self._send("Stop", "s1", proj, ts(45))
-        self.assertEqual(r["status"], "stopped")
-
-        summary = self.recorder.get_codex_today_summary()
-        self.assertAlmostEqual(summary[0]["seconds"], 30.0, places=1)
-
-    # ------------------------------------------------------------------ #
-    #  8. Invalid input: bad event, bad path, bad timestamp              #
-    # ------------------------------------------------------------------ #
-
-    def test_invalid_event_type(self):
-        is_valid, msg, dt = CodexActivityManager.validate_event(
-            "InvalidEvent", "s1", "D:\\Projects\\X", "2026-07-20T10:00:00.000Z"
+    def test_validation(self):
+        ok, _, parsed = CodexActivityManager.validate_event(
+            "PostToolUse", "s1", r"D:\Projects\X", "2026-07-20T10:00:00Z"
         )
-        self.assertFalse(is_valid)
+        self.assertTrue(ok)
+        self.assertIsNotNone(parsed)
 
-    def test_invalid_relative_path(self):
-        is_valid, msg, dt = CodexActivityManager.validate_event(
-            "PreToolUse", "s1", "relative/path", "2026-07-20T10:00:00.000Z"
+        bad_event, _, _ = CodexActivityManager.validate_event(
+            "Unknown", "s1", r"D:\Projects\X", "2026-07-20T10:00:00Z"
         )
-        self.assertFalse(is_valid)
-        self.assertIn("absolute", msg.lower())
-
-    def test_invalid_timestamp(self):
-        is_valid, msg, dt = CodexActivityManager.validate_event(
-            "PreToolUse", "s1", "D:\\Projects\\X", "not-a-date"
+        bad_path, _, _ = CodexActivityManager.validate_event(
+            "PreToolUse", "s1", "relative/path", "2026-07-20T10:00:00Z"
         )
-        self.assertFalse(is_valid)
-
-    def test_empty_session_id(self):
-        is_valid, msg, dt = CodexActivityManager.validate_event(
-            "PreToolUse", "", "D:\\Projects\\X", "2026-07-20T10:00:00.000Z"
-        )
-        self.assertFalse(is_valid)
-
-    # ------------------------------------------------------------------ #
-    #  9. Get active projects                                            #
-    # ------------------------------------------------------------------ #
-
-    def test_get_active_projects(self):
-        proj = "D:\\Projects\\MyGame"
-        self._send("SessionStart", "s1", proj, ts(0))
-
-        # Use a recent timestamp so it's still active
-        recent = datetime.now(timezone.utc) - timedelta(seconds=10)
-        self._send("PreToolUse", "s1", proj, recent)
-
-        active = self.manager.get_active_projects()
-        self.assertEqual(len(active), 1)
-        self.assertTrue(active[0]["active"])
-        self.assertEqual(active[0]["project_name"], "MyGame")
+        self.assertFalse(bad_event)
+        self.assertFalse(bad_path)
 
 
 if __name__ == "__main__":

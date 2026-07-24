@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, send_file, request, Response
 
 from config import AppConfig, DB_FILE
+from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.time_recorder import TimeRecorder
 from tracker.tracking_engine import TrackingEngine
@@ -47,11 +48,13 @@ class WebServer:
         recorder: TimeRecorder,
         engine: TrackingEngine,
         codex_manager: CodexActivityManager,
+        chrome_url_cache: ChromeUrlCache = None,
     ):
         self._config = config
         self._recorder = recorder
         self._engine = engine
         self._codex_manager = codex_manager
+        self._chrome_url_cache = chrome_url_cache
         self._thread: threading.Thread | None = None
         # NOTE: Do NOT bulk-update time_records tags on startup.
         # With keyword rules in place, a process-level tag sync would overwrite
@@ -78,7 +81,6 @@ class WebServer:
         # ---- API: Dashboard ----
         @app.route("/api/dashboard")
         def api_dashboard():
-            summary = self._recorder.get_today_summary()
             codex_summary = self._recorder.get_codex_today_summary()
 
             # Tag-based classification from time_segments (includes both foreground AND codex hook segments)
@@ -86,18 +88,6 @@ class WebServer:
             tag_totals = {}
             for r in seg_tag_dist:
                 tag_totals[r["tag"]] = tag_totals.get(r["tag"], 0) + r["seconds"]
-
-            # Codex summary for display table only (not added to totals — already in time_segments)
-            codex_by_tag = {}
-            for r in codex_summary:
-                pn = r["project_name"]
-                if "(Indie)" in pn:
-                    tag = "Indie"
-                elif "(Work)" in pn:
-                    tag = "Work"
-                else:
-                    tag = "Work"
-                codex_by_tag[tag] = codex_by_tag.get(tag, 0) + r["seconds"]
 
             total = sum(tag_totals.values())
             total_indie = tag_totals.get("Indie", 0)
@@ -121,6 +111,7 @@ class WebServer:
                 app_breakdown.append({
                     "name": r["display_name"],
                     "process_name": r["process_name"],
+                    "project": r.get("project", ""),
                     "tag": r.get("tag", "Other"),
                     "duration": _fmt_duration(r["seconds"]),
                     "percent": round(pct, 1),
@@ -152,21 +143,63 @@ class WebServer:
                 r["percent"] = round((r["seconds"] / total_indie * 100) if total_indie > 0 else 0, 1)
 
             # Codex activity
-            codex_active = self._codex_manager.get_active_projects() if self._codex_manager else []
+            # Codex desktop is single-instance. Hook history may mention several
+            # projects, but only the most recently active project is current.
+            codex_current_active = (
+                self._codex_manager.get_current_active_project()
+                if self._codex_manager else None
+            )
             codex_table = []
             for r in codex_summary:
-                status = ""
-                for ap in codex_active:
-                    if ap["project"] == r["project"]:
-                        status = "Active" if ap["active"] else f"Idle {ap['idle_seconds'] // 60}m"
-                        break
+                status = "Active" if (
+                    codex_current_active
+                    and codex_current_active["project"] == r["project"]
+                ) else ""
                 codex_table.append({
                     "project": r["project_name"],
                     "duration": _fmt_duration(r["seconds"]),
                     "status": status,
                 })
 
-            # Current tracking (foreground + parallel Codex hook)
+            # Current tracking: show every selected non-Codex window, one per
+            # monitor, so two Devin projects are visible independently.
+            current_windows = []
+            seen_windows = set()
+            codex_processes = {"chatgpt.exe", "codex.exe", "codex-code-mode-host.exe"}
+            if self._engine.is_running():
+                for fg in self._engine.get_current_windows():
+                    if fg.process_name.lower() in codex_processes and codex_current_active:
+                        continue
+                    dn = self._config.get_display_name(fg.process_name, fg.window_title)
+                    if dn:
+                        name = TrackingEngine._build_display_name(dn, fg.project)
+                        # For Chrome, show short title only
+                        if fg.process_name.lower() == "chrome.exe":
+                            title = fg.window_title
+                            if title.endswith(" - Google Chrome"):
+                                title = title[:-len(" - Google Chrome")]
+                            if len(title) > 30:
+                                title = title[:30] + "…"
+                            name = f"Chrome [{title}]" if title else "Chrome"
+                            tag = self._engine._resolve_tag_with_url(fg) or "—"
+                        else:
+                            tag = self._config.resolve_app_tag(
+                                fg.process_name, fg.window_title, fg.project, name
+                            )
+                    else:
+                        name = f"Other ({fg.process_name})"
+                        tag = "Other"
+                    key = (name, tag, fg.monitor_index)
+                    if key in seen_windows:
+                        continue
+                    seen_windows.add(key)
+                    current_windows.append({
+                        "name": name,
+                        "tag": tag,
+                        "monitor": fg.monitor_index + 1 if fg.monitor_index >= 0 else None,
+                    })
+
+            # Backwards-compatible focused-window fields.
             current_fg = ""
             current_fg_tag = ""
             if self._engine.is_running():
@@ -187,19 +220,17 @@ class WebServer:
                         current_fg = f"Other ({self._engine._last_fg.process_name})"
                         current_fg_tag = "Other"
 
-            # Parallel Codex hook activity — only show if Codex is in foreground
+            # Single Codex instance — show only the most recently active project.
             current_codex = []
             if self._codex_manager and self._engine:
                 fg_is_codex = self._engine._is_codex_foreground()
                 if fg_is_codex:
-                    active = self._codex_manager.get_active_projects()
-                    codex_active = [p for p in active if p["active"]]
-                    current_codex = list(dict.fromkeys(p["project_name"] for p in codex_active))
+                    active = self._codex_manager.get_current_active_project()
+                    if active:
+                        current_codex = [active["project_name"]]
 
             # Compat: merged string
-            parts = []
-            if current_fg:
-                parts.append(current_fg)
+            parts = [w["name"] for w in current_windows]
             if current_codex:
                 parts.append("Codex: " + ", ".join(current_codex))
             current = " + ".join(parts) if parts else ""
@@ -214,6 +245,7 @@ class WebServer:
                     "current": current or "--",
                     "current_fg": current_fg,
                     "current_fg_tag": current_fg_tag,
+                    "current_windows": current_windows,
                     "current_codex": current_codex,
                 },
                 "pie": pie_data,
@@ -222,15 +254,13 @@ class WebServer:
                 "timeline": timeline,
                 "indie_details": indie_rows,
                 "codex_table": codex_table,
-                "codex_active_count": sum(1 for p in codex_active if p["active"]),
+                "codex_active_count": 1 if codex_current_active else 0,
                 "idle_time": _fmt_duration(self._recorder.get_today_idle_time()),
             })
 
         # ---- API: History ----
         @app.route("/api/history")
         def api_history():
-            import sqlite3
-
             days_param = request.args.get("days", 7)
             is_all = days_param == "all"
             if is_all:
@@ -242,76 +272,32 @@ class WebServer:
 
             # Query date range
             if is_all:
-                conn = sqlite3.connect(str(DB_FILE))
-                conn.row_factory = sqlite3.Row
-                min_row = conn.execute("SELECT MIN(date) AS d FROM time_records").fetchone()
-                min_row2 = conn.execute("SELECT MIN(date) AS d FROM codex_time_records").fetchone()
-                conn.close()
-                dates_avail = [r["d"] for r in [min_row, min_row2] if r and r["d"]]
-                if dates_avail:
-                    start = date.fromisoformat(min(dates_avail))
-                else:
-                    start = end
+                first_date = self._recorder.get_first_record_date()
+                start = date.fromisoformat(first_date) if first_date else end
             else:
                 start = end - timedelta(days=days - 1)
 
             actual_days = max(1, (end - start).days + 1)
 
             daily_totals = self._recorder.get_daily_totals(start, end)
-            range_data = self._recorder.get_range_summary(start, end)
+            tag_daily = self._recorder.get_daily_tag_breakdown(start, end)
+            range_apps = self._recorder.get_range_app_breakdown(start, end)
 
-            # Codex range breakdown + daily codex breakdown
-            codex_rows = []
-            codex_daily = []  # [(date_iso, indie_seconds, work_seconds)]
-            try:
-                conn = sqlite3.connect(str(DB_FILE))
-                conn.row_factory = sqlite3.Row
-                codex_rows = conn.execute(
-                    "SELECT project_name, SUM(seconds) AS seconds FROM codex_time_records WHERE date >= ? AND date <= ? GROUP BY project_name",
-                    (start.isoformat(), end.isoformat()),
-                ).fetchall()
-                codex_daily = conn.execute(
-                    """SELECT date,
-                              SUM(CASE WHEN project_name LIKE '%(Indie)' THEN seconds ELSE 0 END) AS indie,
-                              SUM(CASE WHEN project_name NOT LIKE '%(Indie)' THEN seconds ELSE 0 END) AS work
-                       FROM codex_time_records WHERE date >= ? AND date <= ? GROUP BY date ORDER BY date""",
-                    (start.isoformat(), end.isoformat()),
-                ).fetchall()
-                conn.close()
-            except Exception:
-                pass
+            total_indie = sum(tags.get("Indie", 0) for tags in tag_daily.values())
+            total_work = sum(tags.get("Work", 0) for tags in tag_daily.values())
+            grand_total = sum(sum(tags.values()) for tags in tag_daily.values())
 
-            # Foreground daily tag breakdown (tag-based, not suffix-based)
-            fg_tag_daily = self._recorder.get_daily_tag_breakdown(start, end)
-            fg_daily = {}  # {date_iso: [indie_s, work_s]}
-            for d_iso, tag_map in fg_tag_daily.items():
-                indie_s = tag_map.get("Indie", 0)
-                work_s = tag_map.get("Work", 0)
-                other_s = sum(s for t, s in tag_map.items() if t not in ("Indie", "Work"))
-                fg_daily[d_iso] = [indie_s, work_s + other_s]
-
-            codex_daily_map = {r["date"]: (r["indie"] or 0, r["work"] or 0) for r in codex_daily}
-
-            fg_indie = sum(v[0] for v in fg_daily.values())
-            fg_work = sum(v[1] for v in fg_daily.values())
-            codex_indie = sum(r["seconds"] for r in codex_rows if "(Indie)" in r["project_name"])
-            codex_work = sum(r["seconds"] for r in codex_rows if "(Indie)" not in r["project_name"])
-
-            total_indie = fg_indie + codex_indie
-            total_work = fg_work + codex_work
-            grand_total = total_indie + total_work
-
-            # Daily trend with merged fg + codex, split by work/indie
+            # Total contains every non-idle tag. Work and Indie remain explicit
+            # instead of silently folding Other/custom tags into Work.
             date_map_total = {d: s for d, s in daily_totals}
             trend = []
             d = start
             while d <= end:
                 d_iso = d.isoformat()
-                fg_i, fg_w = fg_daily.get(d_iso, (0.0, 0.0))
-                cx_i, cx_w = codex_daily_map.get(d_iso, (0.0, 0.0))
-                day_indie = fg_i + cx_i
-                day_work = fg_w + cx_w
-                day_total = day_indie + day_work
+                day_tags = tag_daily.get(d_iso, {})
+                day_indie = day_tags.get("Indie", 0)
+                day_work = day_tags.get("Work", 0)
+                day_total = date_map_total.get(d_iso, 0)
                 trend.append({
                     "date": d_iso[5:],
                     "hours": round(day_total / 3600, 2),
@@ -323,40 +309,17 @@ class WebServer:
             days_with_data = len([1 for t in trend if t["hours"] > 0])
             avg_divisor = max(1, days_with_data) if is_all else actual_days
 
-            # Per-app summary
-            all_apps = {}
-            for name, recs in range_data.items():
-                all_apps[name] = sum(s for _, s in recs)
-            for r in codex_rows:
-                pn = r["project_name"]
-                all_apps[pn] = all_apps.get(pn, 0) + r["seconds"]
-
-            # Build display_name -> (process_name, tag) map for icon lookup and tag display
-            name_to_proc = {}
-            name_to_tag = {}
-            try:
-                conn = sqlite3.connect(str(DB_FILE))
-                conn.row_factory = sqlite3.Row
-                proc_rows = conn.execute(
-                    "SELECT DISTINCT display_name, process_name, tag FROM time_records WHERE date >= ? AND date <= ?",
-                    (start.isoformat(), end.isoformat()),
-                ).fetchall()
-                conn.close()
-                for pr in proc_rows:
-                    name_to_proc[pr["display_name"]] = pr["process_name"]
-                    name_to_tag[pr["display_name"]] = pr["tag"]
-            except Exception:
-                pass
-
             per_app = []
-            for name, total_s in sorted(all_apps.items(), key=lambda kv: -kv[1]):
+            for r in range_apps:
+                total_s = r["seconds"]
                 per_app.append({
-                    "name": name,
-                    "process_name": name_to_proc.get(name, ""),
-                    "tag": name_to_tag.get(name, "Other"),
+                    "name": r["display_name"],
+                    "process_name": r["process_name"],
+                    "project": r.get("project", ""),
+                    "tag": r.get("tag", "Other"),
                     "total": _fmt_duration(total_s),
                     "avg": _fmt_duration(total_s / actual_days),
-                    "days_active": max(1, days_with_data),
+                    "days_active": r.get("days_active", 1),
                     "pct": round((total_s / grand_total * 100) if grand_total > 0 else 0, 1),
                 })
 
@@ -426,6 +389,21 @@ class WebServer:
                         "detail": f"+{r['seconds']:.0f}s",
                     })
 
+            if filter_type in ("all", "chrome"):
+                chrome_rows = conn.execute(
+                    "SELECT url, domain, received_at FROM chrome_url_events ORDER BY received_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                for r in chrome_rows:
+                    rows.append({
+                        "time": r["received_at"],
+                        "source": "Chrome",
+                        "action": "url_reported",
+                        "session": "",
+                        "target": r["domain"] or r["url"],
+                        "detail": r["url"],
+                    })
+
             conn.close()
             rows.sort(key=lambda x: x["time"], reverse=True)
             rows = rows[:limit]
@@ -469,6 +447,8 @@ class WebServer:
                 "work_keywords": self._config._work_keywords,
                 "process_tags": self._config.process_tags,
                 "tag_keyword_rules": self._config.tag_keyword_rules,
+                "app_tag_overrides": self._config.app_tag_overrides,
+                "url_tag_rules": self._config.url_tag_rules,
                 "tags": self._recorder.list_tags(),
             })
 
@@ -495,6 +475,9 @@ class WebServer:
             if "tag_keyword_rules" in data:
                 for proc, rules in data["tag_keyword_rules"].items():
                     self._config.set_tag_keyword_rules(proc, rules)
+            if "url_tag_rules" in data:
+                for proc, rules in data["url_tag_rules"].items():
+                    self._config.set_url_tag_rules(proc, rules)
             self._config.save()
             return jsonify({"status": "ok"})
 
@@ -519,15 +502,22 @@ class WebServer:
         @app.route("/api/tags/<int:tag_id>", methods=["PUT"])
         def api_update_tag(tag_id):
             data = request.get_json()
+            old_tag = next((t for t in self._recorder.list_tags() if t["id"] == tag_id), None)
             ok = self._recorder.update_tag(tag_id, data.get("name"), data.get("color"))
             if ok:
+                new_name = data.get("name")
+                if old_tag and new_name and new_name != old_tag["name"]:
+                    self._config.replace_tag_references(old_tag["name"], new_name)
                 return jsonify({"status": "ok"})
             return jsonify({"error": "not found or system tag"}), 400
 
         @app.route("/api/tags/<int:tag_id>", methods=["DELETE"])
         def api_delete_tag(tag_id):
+            old_tag = next((t for t in self._recorder.list_tags() if t["id"] == tag_id), None)
             ok = self._recorder.delete_tag(tag_id)
             if ok:
+                if old_tag:
+                    self._config.replace_tag_references(old_tag["name"], "Other")
                 return jsonify({"status": "ok"})
             return jsonify({"error": "not found or system tag"}), 400
 
@@ -537,23 +527,24 @@ class WebServer:
             data = request.get_json()
             proc = data.get("process_name", "").strip()
             display_name = data.get("display_name", "").strip()
+            project = data.get("project", "").strip()
             tag = data.get("tag", "Other").strip()
-            if not proc:
-                return jsonify({"error": "process_name required"}), 400
+            if not proc or not display_name:
+                return jsonify({"error": "process_name and display_name required"}), 400
+            valid_tags = {item["name"] for item in self._recorder.list_tags()}
+            if tag not in valid_tags:
+                return jsonify({"error": f"unknown tag: {tag}"}), 400
             # Add process to monitored list if not already there
-            if proc not in self._config.processes:
+            if not self._config.is_monitored(proc):
                 self._config.add_process(proc, display_name or proc)
-            # Set process tag
-            old_tag = self._config.process_tags.get(proc, "Other")
-            self._config.set_process_tag(proc, tag)
-            self._config.save()
-            # Update historical time_records: only change records with the OLD tag,
-            # preserving records that were tagged differently via keyword rules
-            if old_tag != tag:
-                try:
-                    TimeRecorder.update_process_tag_selective(proc, old_tag, tag)
-                except Exception as e:
-                    logger.warning(f"Failed to update historical tags: {e}")
+            # Persist an exact app/project override. It has higher priority than
+            # keyword and process rules, so the next poll cannot revert it.
+            self._config.set_app_tag_override(proc, project, display_name, tag)
+            try:
+                TimeRecorder.update_app_tag(proc, display_name, project, tag)
+            except Exception as e:
+                logger.warning("Failed to update app tag history: %s", e)
+                return jsonify({"error": str(e)}), 500
             return jsonify({"status": "ok"})
 
         # ---- API: Tag Rules ----
@@ -605,24 +596,41 @@ class WebServer:
             buf = io.StringIO()
             buf.write("\ufeff")  # BOM for Excel
             writer = csv.writer(buf)
-            writer.writerow(["Date", "DisplayName", "ProcessName", "Project", "Seconds", "UpdatedAt"])
+            writer.writerow(["Date", "DisplayName", "ProcessName", "Project", "Tag", "Seconds", "UpdatedAt"])
 
             import sqlite3
             conn = sqlite3.connect(str(DB_FILE))
             conn.row_factory = sqlite3.Row
             if start and end:
                 rows = conn.execute(
-                    "SELECT date, display_name, process_name, project, seconds, updated_at FROM time_records WHERE date >= ? AND date <= ? ORDER BY date, seconds DESC",
+                    """
+                    SELECT date, display_name, process_name, project, tag,
+                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
+                    FROM time_segments
+                    WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                    GROUP BY date, display_name, process_name, project, tag
+                    ORDER BY date, seconds DESC
+                    """,
                     (start.isoformat(), end.isoformat()),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT date, display_name, process_name, project, seconds, updated_at FROM time_records ORDER BY date, seconds DESC"
+                    """
+                    SELECT date, display_name, process_name, project, tag,
+                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
+                    FROM time_segments
+                    WHERE tag != 'Idle'
+                    GROUP BY date, display_name, process_name, project, tag
+                    ORDER BY date, seconds DESC
+                    """
                 ).fetchall()
             conn.close()
 
             for r in rows:
-                writer.writerow([r["date"], r["display_name"], r["process_name"], r["project"], r["seconds"], r["updated_at"]])
+                writer.writerow([
+                    r["date"], r["display_name"], r["process_name"], r["project"],
+                    r["tag"], r["seconds"], r["updated_at"],
+                ])
 
             buf.seek(0)
             return Response(
@@ -630,6 +638,30 @@ class WebServer:
                 mimetype="text/csv",
                 headers={"Content-Disposition": f"attachment; filename=worktime_{start_str or 'all'}_{end_str or 'all'}.csv"},
             )
+
+        # ---- API: Chrome URL (from browser extension) ----
+        @app.route("/api/chrome-url", methods=["POST"])
+        def api_chrome_url():
+            if self._chrome_url_cache is None:
+                logger.warning("POST /api/chrome-url received but cache not enabled")
+                return jsonify({"error": "Chrome URL cache not enabled"}), 503
+            data = request.get_json(silent=True)
+            if not data:
+                logger.warning("POST /api/chrome-url invalid JSON from %s", request.remote_addr)
+                return jsonify({"error": "Invalid JSON"}), 400
+            url = data.get("url", "")
+            if not url:
+                logger.warning("POST /api/chrome-url missing url field")
+                return jsonify({"error": "url required"}), 400
+            self._chrome_url_cache.set_url(url)
+            logger.info("POST /api/chrome-url url=%s from=%s", url, request.remote_addr)
+            return jsonify({"status": "ok"})
+
+        @app.route("/api/chrome-url", methods=["GET"])
+        def api_chrome_url_get():
+            if self._chrome_url_cache is None:
+                return jsonify({"error": "Chrome URL cache not enabled"}), 503
+            return jsonify({"url": self._chrome_url_cache.get_url()})
 
         return app
 

@@ -18,6 +18,7 @@ DEFAULT_PROCESSES: Dict[str, str] = {
     "WeChat.exe": "WeChat (Work)",
     "WeChatAppEx.exe": "WeChat (Work)",
     "msedge.exe": "Edge",
+    "chrome.exe": "Chrome",
 }
 
 DEFAULT_IDLE_THRESHOLD_SECONDS = 300  # 5 minutes
@@ -53,6 +54,23 @@ DEFAULT_TAG_KEYWORD_RULES: Dict[str, List[Dict]] = {
 # Default process tags: process_name -> default tag when no keyword matches
 DEFAULT_PROCESS_TAGS: Dict[str, str] = {
     "msedge.exe": "Work",
+    "chrome.exe": "Work",
+}
+
+# Default URL domain tag rules: process_name -> [{domain, tag}]
+# Checked in order; first domain match wins. Used when Chrome extension reports URL.
+DEFAULT_URL_TAG_RULES: Dict[str, List[Dict]] = {
+    "chrome.exe": [
+        {"domain": "chatgpt.com", "tag": "Indie"},
+        {"domain": "claude.ai", "tag": "Indie"},
+        {"domain": "gemini.google.com", "tag": "Indie"},
+        {"domain": "itch.io", "tag": "Indie"},
+        {"domain": "unity.com", "tag": "Indie"},
+        {"domain": "assetstore.unity.com", "tag": "Indie"},
+        {"domain": "flowus.cn", "tag": "Indie"},
+        {"domain": "gitee.com", "tag": "Work"},
+        {"domain": "github.com", "tag": "Work"},
+    ],
 }
 
 CONFIG_DIR = Path.home() / ".worktime-tracker"
@@ -73,6 +91,8 @@ class AppConfig:
         self._work_keywords: Dict[str, List[str]] = {}
         self._process_tags: Dict[str, str] = {}
         self._tag_keyword_rules: Dict[str, List[Dict]] = {}
+        self._app_tag_overrides: Dict[str, Dict[str, str]] = {}
+        self._url_tag_rules: Dict[str, List[Dict]] = {}
         self.load()
 
     def load(self):
@@ -91,6 +111,8 @@ class AppConfig:
                 self._work_keywords = data.get("work_keywords", {})
                 self._process_tags = data.get("process_tags", {})
                 self._tag_keyword_rules = data.get("tag_keyword_rules", {})
+                self._app_tag_overrides = data.get("app_tag_overrides", {})
+                self._url_tag_rules = data.get("url_tag_rules", {})
 
                 # Merge default process tags (so new defaults appear)
                 for proc, tag in DEFAULT_PROCESS_TAGS.items():
@@ -101,6 +123,11 @@ class AppConfig:
                 for proc, rules in DEFAULT_TAG_KEYWORD_RULES.items():
                     if proc not in self._tag_keyword_rules:
                         self._tag_keyword_rules[proc] = list(rules)
+
+                # Merge default URL tag rules (so new defaults appear)
+                for proc, rules in DEFAULT_URL_TAG_RULES.items():
+                    if proc not in self._url_tag_rules:
+                        self._url_tag_rules[proc] = list(rules)
 
                 # One-time migration: convert old indie/work keywords to tag keyword rules
                 if not self._tag_keyword_rules and (self._indie_keywords or self._work_keywords):
@@ -166,6 +193,8 @@ class AppConfig:
             "work_keywords": self._work_keywords,
             "process_tags": self._process_tags,
             "tag_keyword_rules": self._tag_keyword_rules,
+            "app_tag_overrides": self._app_tag_overrides,
+            "url_tag_rules": self._url_tag_rules,
         }
         CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -290,6 +319,100 @@ class AppConfig:
 
         return "Other"
 
+    def resolve_keyword_tag(self, process_name: str, window_title: str = "") -> Optional[str]:
+        """Resolve tag from keyword rules only (no process-default fallback).
+
+        Returns the matched tag, or None if no keyword rule matches.
+        """
+        matched_key = None
+        for key in self._processes:
+            if key.lower() == process_name.lower():
+                matched_key = key
+                break
+        if not matched_key or not window_title:
+            return None
+        title_lower = window_title.lower()
+        keyword_rules = self._tag_keyword_rules.get(matched_key, [])
+        for rule in keyword_rules:
+            kw = rule.get("keyword", "")
+            tag = rule.get("tag", "Other")
+            if kw and kw.lower() in title_lower:
+                return tag
+        return None
+
+    @staticmethod
+    def _app_override_key(project: str = "", display_name: str = "") -> str:
+        if project:
+            return "project:" + project.strip().lower()
+        return "display:" + display_name.strip().lower()
+
+    @property
+    def app_tag_overrides(self) -> Dict[str, Dict[str, str]]:
+        return self._app_tag_overrides
+
+    def get_app_tag_override(
+        self,
+        process_name: str,
+        project: str = "",
+        display_name: str = "",
+    ) -> Optional[str]:
+        """Return a persistent App Breakdown override for this exact row."""
+        overrides = self._app_tag_overrides.get(process_name.lower(), {})
+        if project:
+            tag = overrides.get(self._app_override_key(project=project))
+            if tag:
+                return tag
+        if display_name:
+            return overrides.get(self._app_override_key(display_name=display_name))
+        return None
+
+    def set_app_tag_override(
+        self,
+        process_name: str,
+        project: str,
+        display_name: str,
+        tag: str,
+    ):
+        proc_key = process_name.lower()
+        identity_key = self._app_override_key(project, display_name)
+        if not identity_key.split(":", 1)[1]:
+            raise ValueError("project or display_name is required")
+        self._app_tag_overrides.setdefault(proc_key, {})[identity_key] = tag
+        self.save()
+
+    def resolve_app_tag(
+        self,
+        process_name: str,
+        window_title: str = "",
+        project: str = "",
+        display_name: str = "",
+    ) -> str:
+        """Resolve an exact app/project override before normal tag rules."""
+        override = self.get_app_tag_override(process_name, project, display_name)
+        if override:
+            return override
+        return self.resolve_tag(process_name, window_title)
+
+    def replace_tag_references(self, old_tag: str, new_tag: str):
+        """Keep process, keyword and app overrides valid after tag rename/delete."""
+        changed = False
+        for proc, tag in list(self._process_tags.items()):
+            if tag == old_tag:
+                self._process_tags[proc] = new_tag
+                changed = True
+        for rules in self._tag_keyword_rules.values():
+            for rule in rules:
+                if rule.get("tag") == old_tag:
+                    rule["tag"] = new_tag
+                    changed = True
+        for overrides in self._app_tag_overrides.values():
+            for identity, tag in list(overrides.items()):
+                if tag == old_tag:
+                    overrides[identity] = new_tag
+                    changed = True
+        if changed:
+            self.save()
+
     # ---- Tag rules management ----
 
     @property
@@ -299,6 +422,44 @@ class AppConfig:
     @property
     def tag_keyword_rules(self) -> Dict[str, List[Dict]]:
         return self._tag_keyword_rules
+
+    @property
+    def url_tag_rules(self) -> Dict[str, List[Dict]]:
+        return self._url_tag_rules
+
+    def set_url_tag_rules(self, process_name: str, rules: List[Dict]):
+        self._url_tag_rules[process_name] = rules
+        self.save()
+
+    def resolve_url_tag(self, process_name: str, url: str) -> Optional[str]:
+        """Resolve tag from URL domain rules.
+
+        Returns the matched tag, or None if no URL rule matches
+        (caller should fall back to keyword/process rules).
+        """
+        if not url:
+            return None
+        matched_key = None
+        for key in self._processes:
+            if key.lower() == process_name.lower():
+                matched_key = key
+                break
+        if not matched_key:
+            return None
+        rules = self._url_tag_rules.get(matched_key, [])
+        if not rules:
+            return None
+        from tracker.chrome_url_cache import ChromeUrlCache
+        domain = ChromeUrlCache.extract_domain(url)
+        if not domain:
+            return None
+        for rule in rules:
+            rule_domain = rule.get("domain", "").lower()
+            tag = rule.get("tag", "")
+            if rule_domain and tag:
+                if domain == rule_domain or domain.endswith("." + rule_domain):
+                    return tag
+        return None
 
     def set_process_tag(self, process_name: str, tag: str):
         self._process_tags[process_name] = tag

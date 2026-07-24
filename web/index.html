@@ -254,7 +254,12 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
           <div class="value" :class="{'green': dash.cards.current !== '--', 'dim': dash.cards.current === '--'}">
             <span v-if="dash.cards.current === '--'">--</span>
             <span v-else style="display:flex;flex-direction:column;gap:3px">
-              <span v-if="dash.cards.current_fg" style="font-size:14px"><span class="live-dot" :style="dotStyle(dash.cards.current_fg_tag)"></span>{{ dash.cards.current_fg }}</span>
+              <template v-if="dash.cards.current_windows && dash.cards.current_windows.length">
+                <span v-for="w in dash.cards.current_windows" :key="w.name + '|' + w.monitor" style="font-size:14px">
+                  <span class="live-dot" :style="dotStyle(w.tag)"></span><span v-if="w.monitor" class="text-faint">M{{ w.monitor }} · </span>{{ w.name }}
+                </span>
+              </template>
+              <span v-else-if="dash.cards.current_fg" style="font-size:14px"><span class="live-dot" :style="dotStyle(dash.cards.current_fg_tag)"></span>{{ dash.cards.current_fg }}</span>
               <span v-if="dash.cards.current_codex && dash.cards.current_codex.length" style="font-size:14px;color:#7c88b3"><span class="live-dot" style="background:#7aa2f7;animation-delay:1s"></span>Codex: {{ dash.cards.current_codex.join(', ') }}</span>
             </span>
           </div>
@@ -305,7 +310,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
           <div class="table-wrap">
             <table>
               <thead><tr><th>App</th><th>Tag</th><th class="text-right">Duration</th><th class="text-right">%</th></tr></thead>
-              <tbody><tr v-for="r in dash.app_breakdown" :key="r.name">
+              <tbody><tr v-for="r in dash.app_breakdown" :key="r.name + '|' + r.project + '|' + r.tag">
                 <td>
                   <div class="app-cell">
                     <img v-if="r.process_name" :src="'/api/icon/' + r.process_name" class="app-icon" @error="$event.target.style.display='none'" />
@@ -315,7 +320,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
                   </div>
                 </td>
                 <td>
-                  <select :value="r.tag" @change="changeAppTag(r.process_name, r.name, $event.target.value)" style="padding:3px 8px;font-size:12px;min-width:80px">
+                  <select :value="r.tag" @change="changeAppTag(r.process_name, r.name, r.project, $event.target.value)" style="padding:3px 8px;font-size:12px;min-width:80px">
                     <option v-for="t in settings.tags" :key="t.name" :value="t.name">{{ t.name }}</option>
                   </select>
                 </td>
@@ -422,7 +427,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
         <div class="table-wrap">
           <table>
             <thead><tr><th>App</th><th style="width:25%">Share</th><th class="text-right">Total</th><th class="text-right">Daily Avg</th><th class="text-right">Days</th></tr></thead>
-            <tbody><tr v-for="r in hist.per_app" :key="r.name">
+            <tbody><tr v-for="r in hist.per_app" :key="r.name + '|' + r.tag">
               <td>
                 <div class="app-cell">
                   <img v-if="r.process_name" :src="'/api/icon/' + r.process_name" class="app-icon" @error="$event.target.style.display='none'" />
@@ -624,7 +629,7 @@ createApp({
       { id: 'settings', label: 'Settings', icon: ICONS.settings },
     ];
 
-    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, current: '--', current_fg: '', current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s' });
+    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s' });
     const hist = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, avg: '0s' }, trend: [], per_app: [], tag_trend: [], period_summary: [] });
     const eff = reactive({ focus_sessions: [], switch_frequency: [], peak_hours: [], idle_time: '0s', idle_seconds: 0 });
     const events = ref([]);
@@ -742,9 +747,9 @@ createApp({
       loadSettings();
     }
 
-    async function changeAppTag(processName, displayName, tag) {
+    async function changeAppTag(processName, displayName, project, tag) {
       if (!processName) return;
-      await api('/api/app-tag', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ process_name: processName, display_name: displayName, tag }) });
+      await api('/api/app-tag', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ process_name: processName, display_name: displayName, project, tag }) });
       loadDashboard();
       loadSettings();
     }

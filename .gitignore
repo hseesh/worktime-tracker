@@ -4,6 +4,20 @@ __pycache__/
 *.pyo
 data/
 *.db
+
+# Debug / utility scripts (not part of the app)
 check_db.py
 check_schema.py
+check_tag.py
+debug_area.py
+debug_cloak.py
+debug_devin.py
+debug_mon1.py
 debug_query.py
+debug_windows.py
+fix_tag.py
+
+# IDE
+.idea/
+.vscode/
+*.swp
