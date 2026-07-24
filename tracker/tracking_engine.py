@@ -137,12 +137,23 @@ class TrackingEngine:
 
                 self._current_windows = list(windows)
 
-                # Record time for each visible window
+                # Identify the focused window for tag deduplication
+                focused = get_foreground_info()
+                focused_tag = None
+                focused_hwnd = 0
+                if focused:
+                    focused_hwnd = focused.hwnd
+                    focused_tag = self._compute_tag(focused)
+
+                # Record time for each visible window, skipping same-tag dupes
                 for fg in windows:
+                    if focused_tag and fg.hwnd != focused_hwnd:
+                        fg_tag = self._compute_tag(fg)
+                        if fg_tag and fg_tag == focused_tag:
+                            continue
                     self._record_window(fg, elapsed)
 
                 # Keep the focused window for display
-                focused = get_foreground_info()
                 if focused:
                     self._last_fg = focused
                 elif windows:
@@ -151,6 +162,23 @@ class TrackingEngine:
             logger.error("Poll error: %s", e, exc_info=True)
         finally:
             self._schedule_poll()
+
+    def _compute_tag(self, fg: ForegroundInfo) -> Optional[str]:
+        """Compute the tag for a window without recording (for dedup checks)."""
+        if fg.process_name.lower() in _CODEX_PROCESSES and self._codex_manager:
+            active_proj = self._codex_manager.get_current_active_project()
+            if active_proj:
+                proj_name = active_proj["project_name"]
+                tag = "Indie" if "(Indie)" in proj_name else "Work"
+                override = self._config.get_app_tag_override(
+                    "codex.exe", active_proj["project"], proj_name
+                )
+                if override:
+                    tag = override
+                return tag
+            _, tag = self._classify_codex_from_hook("", fg.window_title)
+            return tag
+        return self._resolve_tag_with_url(fg)
 
     def _record_window(self, fg: ForegroundInfo, elapsed: float):
         """Record elapsed time for a single visible window."""
