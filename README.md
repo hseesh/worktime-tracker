@@ -92,6 +92,15 @@ Chrome 窗口标题是动态的（如 ChatGPT 对话主题），不适合关键�
 
 Chrome URL 上报记录会写入 `chrome_url_events` 表，可在 Event Log 中通过 `filter=chrome` 查看。
 
+## History 日历热力图
+
+History 页面顶部提供最近 365 天的日历热力图：
+
+- 默认按 Indie 时间着色，也可以切换为 Work 或 Total。
+- 每个方块代表一个本地自然日，颜色越深表示对应指标越多。
+- 点击日期会展开当天的总计、Idle、Tag 分布、App/Project 明细和小时时间轴。
+- 热力图不计入 Idle；当天详情会单独展示 Idle。
+
 ## 数据与统计
 
 - 秒级事实表：`time_segments`

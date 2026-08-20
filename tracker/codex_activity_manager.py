@@ -4,22 +4,24 @@ Design:
   - HTTP hook events mark which project is "active" (Codex is working on it).
   - No time accumulation here — time is counted by tracking_engine when Codex
     process is in the foreground window.
-  - A project stays active for ACTIVE_TIMEOUT (5 min) after the last event.
-  - Stop event immediately deactivates the project.
+  - A project stays active until every associated session sends Stop.
+  - Timer eligibility is further gated by Codex being the foreground window.
   - Duplicate events (same sessionId + event + observedAt) are idempotent.
 """
 
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_TIMEOUT_SECONDS = 300    # 5 min: project stays active this long after last event
+MAX_FUTURE_SKEW_SECONDS = 60    # tolerate minor clock skew, reject future events beyond this
 VALID_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
 HEARTBEAT_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
+MAX_SEEN_EVENTS = 10000
 
 
 class CodexActivityManager:
@@ -40,6 +42,7 @@ class CodexActivityManager:
 
         # dedup
         self._seen_events: set = set()
+        self._seen_event_order = deque()
 
     def set_foreground_checker(self, checker):
         """No-op — foreground checking is done by tracking_engine."""
@@ -61,35 +64,42 @@ class CodexActivityManager:
             if dedup_key in self._seen_events:
                 return {"status": "duplicate", "project": project}
             self._seen_events.add(dedup_key)
+            self._seen_event_order.append(dedup_key)
+            if len(self._seen_event_order) > MAX_SEEN_EVENTS:
+                self._seen_events.discard(self._seen_event_order.popleft())
 
             self._recorder.add_codex_event(event, session_id, project, observed_at)
 
             project_name = self._get_project_display_name(project)
 
             if event in HEARTBEAT_EVENTS:
-                return self._handle_heartbeat(session_id, project, project_name, observed_at)
+                # Keep the raw observedAt in the event log, but never let a
+                # slightly fast client clock prolong active tracking.
+                activity_ts = min(observed_at, datetime.now(timezone.utc))
+                return self._handle_heartbeat(session_id, project, project_name, activity_ts)
             elif event == "Stop":
                 return self._handle_stop(session_id, project, project_name, observed_at)
             else:
                 return {"status": "ignored", "project": project}
 
     def get_active_projects(self) -> List[Dict]:
-        """Return list of currently active projects (received event within ACTIVE_TIMEOUT)."""
+        """Return projects with at least one started session that has not stopped."""
         with self._lock:
             now = datetime.now(timezone.utc)
+            active_project_paths = {s["project"] for s in self._sessions.values()}
             result = []
             for proj, last_ts in self._project_last_event.items():
+                if proj not in active_project_paths:
+                    continue
                 gap = (now - last_ts).total_seconds()
-                is_active = gap < ACTIVE_TIMEOUT_SECONDS
-                if is_active:
-                    proj_name = self._get_project_display_name(proj)
-                    result.append({
-                        "project": proj,
-                        "project_name": proj_name,
-                        "last_activity": last_ts.isoformat(),
-                        "active": True,
-                        "idle_seconds": int(gap),
-                    })
+                proj_name = self._get_project_display_name(proj)
+                result.append({
+                    "project": proj,
+                    "project_name": proj_name,
+                    "last_activity": last_ts.isoformat(),
+                    "active": True,
+                    "idle_seconds": max(0, int(gap)),
+                })
             return sorted(result, key=lambda x: x["last_activity"], reverse=True)
 
     def get_current_active_project(self) -> Optional[Dict]:
@@ -124,7 +134,17 @@ class CodexActivityManager:
         project_name: str,
         ts: datetime,
     ) -> Dict:
+        previous = self._sessions.get(session_id, {}).get("project")
         self._sessions[session_id] = {"project": project}
+        if previous and previous != project:
+            # A session can change working directories. Once it does, the old
+            # project must not remain active unless another session still owns it.
+            has_other = any(
+                sid != session_id and s["project"] == previous
+                for sid, s in self._sessions.items()
+            )
+            if not has_other:
+                self._project_last_event.pop(previous, None)
         self._project_last_event[project] = ts
         return {
             "status": "ok",
@@ -140,10 +160,13 @@ class CodexActivityManager:
         project_name: str,
         ts: datetime,
     ) -> Dict:
-        self._sessions.pop(session_id, None)
-        has_other = any(s["project"] == project for s in self._sessions.values())
+        session = self._sessions.pop(session_id, None)
+        stopped_project = session["project"] if session else project
+        has_other = any(
+            s["project"] == stopped_project for s in self._sessions.values()
+        )
         if not has_other:
-            self._project_last_event.pop(project, None)
+            self._project_last_event.pop(stopped_project, None)
         return {
             "status": "stopped",
             "project": project,
@@ -169,4 +192,8 @@ class CodexActivityManager:
             dt = datetime.fromisoformat(observed_at_str.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             return False, f"Cannot parse observedAt: {observed_at_str}", None
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            return False, "observedAt must include a timezone (for example, Z)", None
+        if dt > datetime.now(timezone.utc) + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS):
+            return False, "observedAt is too far in the future", None
         return True, "", dt

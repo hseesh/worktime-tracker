@@ -113,6 +113,70 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
 /* ---- Chart ---- */
 .chart-container { height: 320px; }
 
+/* ---- History heatmap ---- */
+.history-page { display: flex; flex-direction: column; }
+.history-page > .page-title { order: -2; }
+.history-page > .heatmap-card { order: -1; }
+.heatmap-card { margin-bottom: 16px; }
+.heatmap-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.heatmap-heading .title { margin-bottom: 0; }
+.heatmap-select { margin-left: auto; min-width: 120px; }
+.heatmap-summary { color: var(--text-muted); font-size: 12px; margin: -8px 0 16px; }
+.heatmap-scroll { overflow-x: auto; padding-bottom: 4px; }
+.heatmap-layout { display: flex; gap: 8px; min-width: 760px; }
+.heatmap-weekdays { display: grid; grid-template-rows: repeat(7, 13px); gap: 3px; padding-top: 20px; flex: 0 0 28px; }
+.heatmap-weekdays span { color: var(--text-muted); font-size: 10px; line-height: 13px; }
+.heatmap-grid { display: flex; gap: 3px; flex: 0 0 auto; }
+.heatmap-week { display: grid; grid-template-columns: 13px; grid-template-rows: 17px repeat(7, 13px); gap: 3px; flex: 0 0 13px; min-width: 13px; }
+.heatmap-month { color: var(--text-muted); font-size: 10px; line-height: 17px; white-space: nowrap; overflow: visible; }
+.heatmap-cell { width: 13px; height: 13px; aspect-ratio: 1 / 1; padding: 0; box-sizing: border-box; border: 1px solid rgba(255,255,255,.06); border-radius: 3px; background: var(--border); cursor: pointer; }
+.heatmap-cell.empty { opacity: .35; cursor: default; }
+.heatmap-cell:not(.empty):hover { outline: 2px solid var(--text); outline-offset: 1px; }
+.heatmap-cell.metric-indie.level-1 { background: #d8f3dc; }
+.heatmap-cell.metric-indie.level-2 { background: #95e6a6; }
+.heatmap-cell.metric-indie.level-3 { background: #46c86a; }
+.heatmap-cell.metric-indie.level-4 { background: #168a3c; }
+.heatmap-cell.metric-work.level-1 { background: #c7d9ff; }
+.heatmap-cell.metric-work.level-2 { background: #8eaff5; }
+.heatmap-cell.metric-work.level-3 { background: #5b7fd2; }
+.heatmap-cell.metric-work.level-4 { background: #34519b; }
+.heatmap-cell.metric-total.level-1 { background: #f7d99b; }
+.heatmap-cell.metric-total.level-2 { background: #e9b95e; }
+.heatmap-cell.metric-total.level-3 { background: #d58b2a; }
+.heatmap-cell.metric-total.level-4 { background: #a85b12; }
+.heatmap-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--text-muted); font-size: 11px; margin-top: 12px; }
+.heatmap-legend .heatmap-cell { width: 13px; cursor: default; }
+.heatmap-tooltip { position: fixed; z-index: 1000; min-width: 142px; padding: 10px 12px; border: 1px solid var(--text-faint); border-radius: 7px; background: rgba(31,35,53,.98); box-shadow: 0 8px 24px rgba(0,0,0,.35); pointer-events: none; }
+.heatmap-tooltip-row { display: flex; justify-content: space-between; gap: 18px; color: var(--text-dim); font-size: 12px; line-height: 20px; }
+.heatmap-tooltip-row strong { color: var(--text); font-weight: 700; }
+.heatmap-tooltip-row.primary { font-weight: 700; }
+.heatmap-tooltip-row.primary.metric-indie { color: var(--green); }
+.heatmap-tooltip-row.primary.metric-work { color: var(--accent); }
+.heatmap-tooltip-row.primary.metric-total { color: var(--yellow); }
+.heatmap-tooltip-row.primary strong { font-size: 13px; }
+.day-detail { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 18px; }
+.day-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.day-detail-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.day-detail-close { color: var(--text-muted); border: 1px solid var(--border); background: transparent; border-radius: 5px; padding: 4px 10px; cursor: pointer; }
+.day-detail-close:hover { color: var(--text); border-color: var(--text-faint); }
+.day-detail-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.day-detail-stat { background: rgba(255,255,255,.025); border: 1px solid var(--border-light); border-radius: 6px; padding: 10px 12px; }
+.day-detail-stat .label { color: var(--text-muted); font-size: 11px; }
+.day-detail-stat .value { color: var(--text); font-size: 17px; font-weight: 700; margin-top: 3px; }
+.day-detail-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.day-detail-section-title { color: var(--text-dim); font-size: 12px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; }
+.day-timeline-scroll { overflow-x: auto; padding-bottom: 4px; }
+.day-timeline-grid { min-width: 760px; display: grid; grid-template-columns: 82px repeat(24, minmax(22px, 1fr)) 62px; gap: 3px; align-items: center; }
+.day-timeline-axis { color: var(--text-muted); font-size: 10px; text-align: center; height: 20px; }
+.day-timeline-axis:first-child, .day-timeline-axis:last-child { text-align: left; }
+.day-timeline-row { display: contents; font-size: 11px; color: var(--text-muted); }
+.day-timeline-tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.day-timeline-cell { height: 18px; padding: 3px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.day-timeline-fill { height: 100%; min-width: 0; border-radius: 2px; transition: width .2s ease; }
+.day-timeline-cell:hover { outline: 1px solid var(--text-faint); }
+.day-timeline-total { text-align: right; white-space: nowrap; }
+@media (max-width: 800px) { .day-detail-columns { grid-template-columns: 1fr; } .heatmap-heading .heatmap-select { margin-left: 0; } }
+
 /* ---- Table ---- */
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -243,11 +307,13 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
           <div class="label">Indie Dev</div>
           <div class="value green">{{ dash.cards.indie }}</div>
           <div class="sub">{{ dash.cards.indie_pct }}% of total</div>
+          <div class="sub">Focus: {{ dash.cards.indie_focus }}</div>
         </div>
         <div class="stat-card work">
           <div class="label">Work</div>
           <div class="value blue">{{ dash.cards.work }}</div>
           <div class="sub">{{ dash.cards.work_pct }}% of total</div>
+          <div class="sub">Focus: {{ dash.cards.work_focus }}</div>
         </div>
         <div class="stat-card now">
           <div class="label">Currently Tracking</div>
@@ -372,7 +438,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
     </div>
 
     <!-- History -->
-    <div v-show="currentTab === 'history'">
+    <div v-show="currentTab === 'history'" class="history-page">
       <div class="page-title">History & Trends</div>
       <div class="cards-row">
         <div class="stat-card total">
@@ -407,6 +473,109 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
           Export CSV
         </button>
+        <span v-if="historyDetailsLoading" class="text-dim" style="font-size:12px">Loading details…</span>
+      </div>
+      <div class="card heatmap-card">
+        <div class="card-header heatmap-heading">
+          <span class="title">Daily Activity</span>
+          <select v-model="heatmapMetric" class="heatmap-select">
+            <option value="indie">Indie</option>
+            <option value="work">Work</option>
+            <option value="total">Total</option>
+          </select>
+        </div>
+        <div class="heatmap-summary">
+          <span v-if="heatmapLoading">Loading Daily Activity…</span>
+          <span v-else>{{ formatDurationSeconds(heatmap.total_seconds) }} tracked · {{ heatmap.days_with_data }} days with activity · {{ heatmap.start }} to {{ heatmap.end }}</span>
+        </div>
+        <div ref="heatmapScroll" class="heatmap-scroll">
+          <div class="heatmap-layout">
+            <div class="heatmap-weekdays">
+              <span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span>
+            </div>
+            <div class="heatmap-grid">
+              <div v-for="(week, wi) in heatmapWeeks()" :key="wi" class="heatmap-week">
+                <div class="heatmap-month">{{ week.label }}</div>
+                <button
+                  v-for="(cell, di) in week.days"
+                  :key="di"
+                  class="heatmap-cell"
+                  :class="[{empty: !cell.date}, 'metric-' + heatmapMetric, 'level-' + heatmapLevel(cell)]"
+                  :disabled="!cell.date"
+                  :aria-label="heatmapTitle(cell)"
+                  @mouseenter="showHeatmapTooltip(cell, $event)"
+                  @mousemove="moveHeatmapTooltip($event)"
+                  @mouseleave="hideHeatmapTooltip"
+                  @click="cell.date && selectHeatmapDate(cell.date)">
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="heatmap-legend">
+          <span>Less</span>
+          <span v-for="level in [0, 1, 2, 3, 4]" :key="level" class="heatmap-cell" :class="['metric-' + heatmapMetric, 'level-' + level]"></span>
+          <span>More</span>
+        </div>
+        <div v-if="heatmapTooltip.visible" class="heatmap-tooltip" :style="{left: heatmapTooltip.x + 'px', top: heatmapTooltip.y + 'px'}">
+          <div v-for="row in heatmapTooltipRows(heatmapTooltip.cell)" :key="row.metric" class="heatmap-tooltip-row" :class="[{primary: row.primary}, 'metric-' + row.metric]">
+            <span>{{ row.label }}</span><strong>{{ formatDurationSeconds(row.seconds) }}</strong>
+          </div>
+        </div>
+
+        <div v-if="dayDetail.date" class="day-detail">
+          <div class="day-detail-header">
+            <span class="day-detail-title">{{ dayDetail.date }}</span>
+            <button class="day-detail-close" @click="clearDayDetail">Close</button>
+          </div>
+          <div class="day-detail-stats">
+            <div class="day-detail-stat"><div class="label">Total</div><div class="value">{{ dayDetail.total }}</div></div>
+            <div class="day-detail-stat"><div class="label">Idle</div><div class="value dim">{{ dayDetail.idle }}</div></div>
+            <div v-for="tag in dayDetail.tags.slice(0, 3)" :key="tag.tag" class="day-detail-stat">
+              <div class="label">{{ tag.tag }}</div><div class="value" :style="{color: tagColor(tag.tag)}">{{ tag.duration }}</div>
+            </div>
+          </div>
+          <div class="day-detail-columns">
+            <div>
+              <div class="day-detail-section-title">Tag Distribution</div>
+              <table>
+                <tbody><tr v-for="tag in dayDetail.tags" :key="tag.tag">
+                  <td><span class="tag" :style="tagStyle(tag.tag)">{{ tag.tag }}</span></td>
+                  <td class="text-right">{{ tag.duration }}</td>
+                  <td class="text-right text-dim">{{ tag.percent }}%</td>
+                </tr></tbody>
+              </table>
+            </div>
+            <div>
+              <div class="day-detail-section-title">Apps / Projects</div>
+              <table>
+                <tbody><tr v-for="app in dayDetail.apps" :key="(app.display_name || app.name || app.process_name) + '|' + app.project + '|' + app.tag">
+                  <td><span class="tag" :style="tagStyle(app.tag)">{{ app.tag }}</span> {{ app.display_name || app.name || app.process_name }}</td>
+                  <td class="text-right">{{ app.duration }}</td>
+                  <td class="text-right text-dim">{{ app.percent }}%</td>
+                </tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div style="margin-top:16px">
+            <div class="day-detail-section-title">Hourly Timeline</div>
+            <div v-if="dayDetail.timeline.length" class="day-timeline-scroll">
+              <div class="day-timeline-grid">
+                <div class="day-timeline-axis">Tag</div>
+                <div v-for="hour in dayTimelineHours()" :key="'axis-' + hour" class="day-timeline-axis">{{ String(hour).padStart(2, '0') }}</div>
+                <div class="day-timeline-axis">Total</div>
+                <template v-for="tag in dayTimelineTags()" :key="tag">
+                  <div class="day-timeline-tag">{{ tag }}</div>
+                  <div v-for="hour in dayTimelineHours()" :key="tag + '-' + hour" class="day-timeline-cell" :title="dayTimelineCellTitle(tag, hour)">
+                    <div class="day-timeline-fill" :style="{width: dayTimelineCellWidth(tag, hour), background: tagColor(tag)}"></div>
+                  </div>
+                  <div class="day-timeline-total">{{ formatDurationSeconds(dayTimelineTagTotal(tag)) }}</div>
+                </template>
+              </div>
+            </div>
+            <div v-else class="empty-state">No active time recorded</div>
+          </div>
+        </div>
       </div>
       <div class="card" style="margin-bottom:16px">
         <div class="card-header"><span class="title">Daily Total Trend</span></div>
@@ -604,12 +773,21 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
           <input type="text" :value="rules.map(r => r.keyword + ':' + r.tag).join(', ')" @change="saveTagKeywordRules(proc, $event.target.value)" placeholder="keyword:Tag, keyword2:Tag2">
         </div>
       </div>
+
+      <div class="card settings-section">
+        <h3>Browser URL Tag Rules</h3>
+        <p class="desc">Classify Chrome time from the active page domain. The Chrome extension must be installed. Format: <code>domain.com:Tag, domain2.com:Tag2</code></p>
+        <div v-for="(rules, proc) in settings.url_tag_rules" :key="proc" class="form-row">
+          <label>{{ settings.processes[proc] || proc }}</label>
+          <input type="text" :value="rules.map(r => r.domain + ':' + r.tag).join(', ')" @change="saveUrlTagRules(proc, $event.target.value)" placeholder="chatgpt.com:Indie, github.com:Work">
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
-const { createApp, ref, reactive, onMounted, onUnmounted, nextTick, watch } = Vue;
+const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
 
 const ICONS = {
   dashboard: '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" fill="currentColor"/>',
@@ -629,8 +807,15 @@ createApp({
       { id: 'settings', label: 'Settings', icon: ICONS.settings },
     ];
 
-    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s' });
+    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, indie_focus: '0s', work: '0s', work_pct: 0, work_focus: '0s', current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s' });
     const hist = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, avg: '0s' }, trend: [], per_app: [], tag_trend: [], period_summary: [] });
+    const heatmap = reactive({ start: '', end: '', days: [], days_with_data: 0, total_seconds: 0, work_seconds: 0, indie_seconds: 0 });
+    const heatmapMetric = ref('indie');
+    const heatmapTooltip = reactive({ visible: false, x: 0, y: 0, cell: { date: '', indie_seconds: 0, work_seconds: 0, total_seconds: 0 } });
+    const heatmapScroll = ref(null);
+    const heatmapLoading = ref(false);
+    const historyDetailsLoading = ref(false);
+    const dayDetail = reactive({ date: '', total: '0s', idle: '0s', tags: [], apps: [], timeline: [] });
     const eff = reactive({ focus_sessions: [], switch_frequency: [], peak_hours: [], idle_time: '0s', idle_seconds: 0 });
     const events = ref([]);
     const eventFilter = ref('all');
@@ -655,20 +840,220 @@ createApp({
     let switchFreqInstance = null;
 
     async function api(url, opts) {
-      const res = await fetch(url, opts);
+      const res = await fetch(url, { cache: 'no-store', ...opts });
       return res.json();
     }
 
     async function loadDashboard() {
       const d = await api('/api/dashboard');
-      Object.assign(dash, d);
+      const { cards, ...details } = d;
+      Object.assign(dash, details);
       nextTick(() => { updatePieChart(); updateTimelineChart(); });
     }
 
+    let liveDashboardLoading = false;
+    async function loadLiveDashboard() {
+      if (liveDashboardLoading) return;
+      liveDashboardLoading = true;
+      try {
+        const d = await api('/api/dashboard/live');
+        Object.assign(dash.cards, d.cards);
+      } finally {
+        liveDashboardLoading = false;
+      }
+    }
+
+    let historyLoadSequence = 0;
     async function loadHistory() {
-      const h = await api(`/api/history?days=${histDays.value}`);
-      Object.assign(hist, h);
-      nextTick(() => { updateTrendChart(); updateTagTrendChart(); updatePeriodChart(); });
+      const sequence = ++historyLoadSequence;
+      heatmapLoading.value = true;
+      historyDetailsLoading.value = true;
+
+      // Daily Activity is the primary History view. Finish it first so the
+      // heatmap is usable before the heavier trend/app aggregations start.
+      try {
+        const hm = await api('/api/history/heatmap?days=365');
+        if (sequence !== historyLoadSequence) return;
+        Object.assign(heatmap, hm);
+        nextTick(() => positionHeatmapCurrent());
+      } catch (error) {
+        console.error('Failed to load Daily Activity:', error);
+      } finally {
+        if (sequence === historyLoadSequence) heatmapLoading.value = false;
+      }
+
+      if (sequence !== historyLoadSequence) return;
+      try {
+        const summary = await api(`/api/history/summary?days=${histDays.value}`);
+        if (sequence !== historyLoadSequence) return;
+        Object.assign(hist.cards, summary.cards || {});
+        hist.trend = summary.trend || [];
+        nextTick(() => { updateTrendChart(); });
+      } catch (error) {
+        console.error('Failed to load History summary:', error);
+      }
+
+      if (sequence !== historyLoadSequence) return;
+      try {
+        const h = await api(`/api/history?days=${histDays.value}`);
+        if (sequence !== historyLoadSequence) return;
+        Object.assign(hist, h);
+        nextTick(() => { updateTrendChart(); updateTagTrendChart(); updatePeriodChart(); });
+      } catch (error) {
+        console.error('Failed to load History details:', error);
+      } finally {
+        if (sequence === historyLoadSequence) historyDetailsLoading.value = false;
+      }
+    }
+
+    function formatDurationSeconds(seconds) {
+      const value = Math.max(0, Math.round(Number(seconds) || 0));
+      const h = Math.floor(value / 3600);
+      const m = Math.floor((value % 3600) / 60);
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    }
+
+    function heatmapValue(cell) {
+      if (!cell || !cell.date) return 0;
+      if (heatmapMetric.value === 'work') return cell.work_seconds || 0;
+      if (heatmapMetric.value === 'total') return cell.total_seconds || 0;
+      return cell.indie_seconds || 0;
+    }
+
+    function heatmapLevel(cell) {
+      const value = heatmapValue(cell);
+      if (!value) return 0;
+      const values = (heatmap.days || [])
+        .map(heatmapValue)
+        .filter(v => v > 0)
+        .sort((a, b) => a - b);
+      if (!values.length) return 0;
+      const max = values[values.length - 1];
+      if (value >= max) return 4;
+      const q1 = values[Math.floor((values.length - 1) * 0.25)];
+      const q2 = values[Math.floor((values.length - 1) * 0.5)];
+      const q3 = values[Math.floor((values.length - 1) * 0.75)];
+      if (value <= q1) return 1;
+      if (value <= q2) return 2;
+      if (value <= q3) return 3;
+      return 4;
+    }
+
+    function heatmapWeeks() {
+      const weeks = [];
+      let previousMonth = '';
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      for (let i = 0; i < (heatmap.days || []).length; i += 7) {
+        const days = heatmap.days.slice(i, i + 7);
+        const first = days.find(cell => cell.date);
+        const monthKey = first ? first.date.slice(0, 7) : '';
+        const monthIndex = monthKey ? Number(monthKey.slice(5, 7)) - 1 : -1;
+        const label = monthKey && monthKey !== previousMonth ? monthNames[monthIndex] : '';
+        if (monthKey) previousMonth = monthKey;
+        weeks.push({ days, label });
+      }
+      // Keep the current date around two-thirds across the visual grid. The
+      // trailing cells are intentionally blank future space, not activity.
+      const currentIndex = (heatmap.days || []).findIndex(cell => cell.date === heatmap.end);
+      if (currentIndex >= 0) {
+        const currentWeek = Math.floor(currentIndex / 7);
+        const targetWeeks = Math.max(weeks.length, Math.ceil((currentWeek + 1) / 0.66));
+        const blankCell = { date: null, total_seconds: 0, indie_seconds: 0, work_seconds: 0, other_seconds: 0 };
+        while (weeks.length < targetWeeks) {
+          weeks.push({ days: Array.from({length: 7}, () => ({ ...blankCell })), label: '' });
+        }
+      }
+      return weeks;
+    }
+
+    function heatmapTitle(cell) {
+      if (!cell || !cell.date) return '';
+      return `${cell.date} · Total ${formatDurationSeconds(cell.total_seconds)} · Indie ${formatDurationSeconds(cell.indie_seconds)} · Work ${formatDurationSeconds(cell.work_seconds)}`;
+    }
+
+    function heatmapTooltipRows(cell) {
+      if (!cell || !cell.date) return [];
+      const labels = { indie: 'Indie', total: 'Total', work: 'Work' };
+      const seconds = {
+        indie: cell.indie_seconds || 0,
+        total: cell.total_seconds || 0,
+        work: cell.work_seconds || 0,
+      };
+      const order = [heatmapMetric.value, 'total', 'indie', 'work'].filter((metric, index, all) => all.indexOf(metric) === index);
+      return order.slice(0, 3).map(metric => ({
+        metric,
+        label: labels[metric],
+        seconds: seconds[metric],
+        primary: metric === heatmapMetric.value,
+      }));
+    }
+
+    function positionHeatmapCurrent() {
+      const scroll = heatmapScroll.value;
+      const currentIndex = (heatmap.days || []).findIndex(cell => cell.date === heatmap.end);
+      if (!scroll || currentIndex < 0) return;
+      const currentWeek = Math.floor(currentIndex / 7);
+      const weekPitch = 16; // 13px cell + 3px gap
+      const target = currentWeek * weekPitch - scroll.clientWidth * 0.66;
+      scroll.scrollLeft = Math.max(0, target);
+    }
+
+    function showHeatmapTooltip(cell, event) {
+      if (!cell || !cell.date) return;
+      heatmapTooltip.cell = cell;
+      heatmapTooltip.visible = true;
+      moveHeatmapTooltip(event);
+    }
+
+    function moveHeatmapTooltip(event) {
+      if (!heatmapTooltip.visible) return;
+      heatmapTooltip.x = Math.max(8, Math.min(event.clientX + 14, window.innerWidth - 175));
+      heatmapTooltip.y = Math.max(8, Math.min(event.clientY + 14, window.innerHeight - 112));
+    }
+
+    function hideHeatmapTooltip() {
+      heatmapTooltip.visible = false;
+    }
+
+    async function selectHeatmapDate(date) {
+      const detail = await api(`/api/history/day?date=${date}`);
+      if (detail.error) return;
+      Object.assign(dayDetail, detail);
+    }
+
+    function clearDayDetail() {
+      dayDetail.date = '';
+      dayDetail.tags = [];
+      dayDetail.apps = [];
+      dayDetail.timeline = [];
+    }
+
+    function dayTimelineHours() {
+      return Array.from({length: 24}, (_, hour) => hour);
+    }
+
+    function dayTimelineTags() {
+      return [...new Set((dayDetail.timeline || []).map(item => item.tag))];
+    }
+
+    function dayTimelineSeconds(tag, hour) {
+      const item = (dayDetail.timeline || []).find(row => row.tag === tag && row.hour === hour);
+      return item ? Number(item.seconds) || 0 : 0;
+    }
+
+    function dayTimelineTagTotal(tag) {
+      return (dayDetail.timeline || [])
+        .filter(item => item.tag === tag)
+        .reduce((total, item) => total + (Number(item.seconds) || 0), 0);
+    }
+
+    function dayTimelineCellWidth(tag, hour) {
+      return `${Math.max(0, Math.min(100, dayTimelineSeconds(tag, hour) / 3600 * 100))}%`;
+    }
+
+    function dayTimelineCellTitle(tag, hour) {
+      return `${tag} ${String(hour).padStart(2, '0')}:00 · ${formatDurationSeconds(dayTimelineSeconds(tag, hour))}`;
     }
 
     async function loadEfficiency() {
@@ -762,6 +1147,18 @@ createApp({
         return { keyword: p, tag: 'Other' };
       });
       await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag_keyword_rules: { [proc]: rules } }) });
+    }
+
+    async function saveUrlTagRules(proc, text) {
+      const rules = text.split(',').map(s => s.trim()).filter(Boolean).flatMap(p => {
+        const idx = p.lastIndexOf(':');
+        if (idx <= 0) return [];
+        const domain = p.slice(0, idx).trim().toLowerCase();
+        const tag = p.slice(idx + 1).trim();
+        return domain && tag ? [{ domain, tag }] : [];
+      });
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url_tag_rules: { [proc]: rules } }) });
+      loadSettings();
     }
 
     function updateTimelineChart() {
@@ -930,20 +1327,23 @@ createApp({
       }, true);
     }
 
-    let dashTimer, eventTimer;
+    let dashTimer, liveDashTimer, eventTimer;
 
     onMounted(() => {
       loadDashboard();
+      loadLiveDashboard();
       loadHistory();
       loadEvents();
       loadSettings();
       loadEfficiency();
       dashTimer = setInterval(loadDashboard, 5000);
+      liveDashTimer = setInterval(loadLiveDashboard, 500);
       eventTimer = setInterval(loadEvents, 3000);
     });
 
     onUnmounted(() => {
       clearInterval(dashTimer);
+      clearInterval(liveDashTimer);
       clearInterval(eventTimer);
       [pieInstance, trendInstance, timelineInstance, tagTrendInstance, periodInstance, peakHoursInstance, switchFreqInstance].forEach(i => { if (i) i.dispose(); });
     });
@@ -955,10 +1355,11 @@ createApp({
     });
 
     return {
-      currentTab, navItems, dash, hist, eff, events, eventFilter, histDays, settings, newProc, newTag,
+      currentTab, navItems, dash, hist, heatmap, heatmapMetric, heatmapTooltip, heatmapScroll, heatmapLoading, historyDetailsLoading, dayDetail, eff, events, eventFilter, histDays, settings, newProc, newTag,
       pieChart, trendChart, timelineChart, tagTrendChart, periodChart, peakHoursChart, switchFreqChart,
       loadHistory, loadEvents, saveSettings, addProcess, removeProcess, saveIndieKeywords, exportCsv,
-      addTag, updateTagColor, deleteTag, setProcessTag, saveTagKeywordRules, changeAppTag,
+      addTag, updateTagColor, deleteTag, setProcessTag, saveTagKeywordRules, saveUrlTagRules, changeAppTag,
+      formatDurationSeconds, heatmapWeeks, heatmapLevel, heatmapTitle, heatmapTooltipRows, showHeatmapTooltip, moveHeatmapTooltip, hideHeatmapTooltip, selectHeatmapDate, clearDayDetail, positionHeatmapCurrent, dayTimelineHours, dayTimelineTags, dayTimelineCellWidth, dayTimelineCellTitle, dayTimelineTagTotal,
       tagColor, tagStyle, dotStyle,
     };
   }

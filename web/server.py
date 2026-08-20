@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from flask import Flask, jsonify, send_file, request, Response
+from werkzeug.serving import make_server
 
 from config import AppConfig, DB_FILE
 from tracker.chrome_url_cache import ChromeUrlCache
@@ -56,11 +57,81 @@ class WebServer:
         self._codex_manager = codex_manager
         self._chrome_url_cache = chrome_url_cache
         self._thread: threading.Thread | None = None
+        self._http_server = None
         # NOTE: Do NOT bulk-update time_records tags on startup.
         # With keyword rules in place, a process-level tag sync would overwrite
         # correctly keyword-tagged records (e.g. ChatGPT→Indie for msedge.exe).
         # Tags are assigned correctly at recording time.
         self._app = self._create_app()
+
+    def _get_live_dashboard_cards(self):
+        """Build the fast-changing dashboard cards without loading chart data."""
+        totals = self._recorder.get_today_live_totals()
+        total = totals["total"]
+        total_indie = totals["indie"]
+        total_work = totals["work"]
+        indie_focus = totals["indie_focus"]
+        work_focus = totals["work_focus"]
+
+        codex_current_active = (
+            self._codex_manager.get_current_active_project()
+            if self._codex_manager else None
+        )
+        current_windows = []
+        seen_windows = set()
+        codex_processes = {"chatgpt.exe", "codex.exe", "codex-code-mode-host.exe"}
+        selected_windows = []
+        if self._engine.is_running():
+            selected_windows = self._engine.get_current_windows()
+            for fg in selected_windows:
+                # A Codex window without an active HTTP hook is not tracked.
+                if fg.process_name.lower() in codex_processes:
+                    continue
+                dn = self._config.get_display_name(fg.process_name, fg.window_title)
+                if dn:
+                    name = TrackingEngine._build_display_name(dn, fg.project)
+                    if fg.process_name.lower() == "chrome.exe":
+                        title = fg.window_title.removesuffix(" - Google Chrome")
+                        if len(title) > 30:
+                            title = title[:30] + "..."
+                        name = f"Chrome [{title}]" if title else "Chrome"
+                        tag = self._engine._resolve_tag_with_url(fg) or "Other"
+                    else:
+                        tag = self._config.resolve_app_tag(
+                            fg.process_name, fg.window_title, fg.project, name
+                        )
+                else:
+                    name = f"Other ({fg.process_name})"
+                    tag = "Other"
+                key = (name, tag, fg.monitor_index)
+                if key not in seen_windows:
+                    seen_windows.add(key)
+                    current_windows.append({
+                        "name": name,
+                        "tag": tag,
+                        "monitor": fg.monitor_index + 1 if fg.monitor_index >= 0 else None,
+                    })
+
+        current_codex = []
+        if codex_current_active and self._engine._is_codex_foreground():
+            current_codex = [codex_current_active["project_name"]]
+
+        parts = [w["name"] for w in current_windows]
+        if current_codex:
+            parts.append("Codex: " + ", ".join(current_codex))
+        current = " + ".join(parts) if parts else ""
+        return {
+            "total": _fmt_duration(total),
+            "indie": _fmt_duration(total_indie),
+            "indie_pct": round((total_indie / total * 100) if total > 0 else 0, 0),
+            "indie_focus": _fmt_duration(indie_focus),
+            "work": _fmt_duration(total_work),
+            "work_pct": round((total_work / total * 100) if total > 0 else 0, 0),
+            "work_focus": _fmt_duration(work_focus),
+            "current": current or "--",
+            "current_windows": current_windows,
+            "current_codex": current_codex,
+        }
 
     def _create_app(self) -> Flask:
         app = Flask(__name__, static_folder=str(WEB_DIR))
@@ -68,7 +139,10 @@ class WebServer:
         # ---- Serve index.html ----
         @app.route("/")
         def index():
-            return send_file(str(INDEX_FILE))
+            response = send_file(str(INDEX_FILE), max_age=0)
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            return response
 
         # ---- API: App Icon ----
         @app.route("/api/icon/<path:process_name>")
@@ -79,6 +153,12 @@ class WebServer:
             return Response(status=404)
 
         # ---- API: Dashboard ----
+        @app.route("/api/dashboard/live")
+        def api_dashboard_live():
+            response = jsonify({"cards": self._get_live_dashboard_cards()})
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
         @app.route("/api/dashboard")
         def api_dashboard():
             codex_summary = self._recorder.get_codex_today_summary()
@@ -168,7 +248,7 @@ class WebServer:
             codex_processes = {"chatgpt.exe", "codex.exe", "codex-code-mode-host.exe"}
             if self._engine.is_running():
                 for fg in self._engine.get_current_windows():
-                    if fg.process_name.lower() in codex_processes and codex_current_active:
+                    if fg.process_name.lower() in codex_processes:
                         continue
                     dn = self._config.get_display_name(fg.process_name, fg.window_title)
                     if dn:
@@ -259,6 +339,58 @@ class WebServer:
             })
 
         # ---- API: History ----
+        @app.route("/api/history/summary")
+        def api_history_summary():
+            """Return the lightweight History cards/trend before full details."""
+            days_param = request.args.get("days", 7)
+            is_all = days_param == "all"
+            if is_all:
+                days = 0
+            else:
+                try:
+                    days = min(max(int(days_param), 1), 90)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "days must be an integer or 'all'"}), 400
+
+            end = date.today()
+            if is_all:
+                first_date = self._recorder.get_first_record_date()
+                start = date.fromisoformat(first_date) if first_date else end
+            else:
+                start = end - timedelta(days=days - 1)
+
+            actual_days = max(1, (end - start).days + 1)
+            tag_daily = self._recorder.get_daily_tag_breakdown(start, end)
+            total_indie = sum(tags.get("Indie", 0) for tags in tag_daily.values())
+            total_work = sum(tags.get("Work", 0) for tags in tag_daily.values())
+            grand_total = sum(sum(tags.values()) for tags in tag_daily.values())
+            trend = []
+            cursor = start
+            while cursor <= end:
+                d_iso = cursor.isoformat()
+                tags = tag_daily.get(d_iso, {})
+                total = sum(tags.values())
+                trend.append({
+                    "date": d_iso[5:],
+                    "hours": round(total / 3600, 2),
+                    "work_hours": round(tags.get("Work", 0) / 3600, 2),
+                    "indie_hours": round(tags.get("Indie", 0) / 3600, 2),
+                })
+                cursor += timedelta(days=1)
+            days_with_data = sum(1 for row in trend if row["hours"] > 0)
+            avg_divisor = max(1, days_with_data) if is_all else actual_days
+            return jsonify({
+                "cards": {
+                    "total": _fmt_duration(grand_total),
+                    "indie": _fmt_duration(total_indie),
+                    "indie_pct": round((total_indie / grand_total * 100) if grand_total > 0 else 0, 0),
+                    "work": _fmt_duration(total_work),
+                    "work_pct": round((total_work / grand_total * 100) if grand_total > 0 else 0, 0),
+                    "avg": _fmt_duration(grand_total / avg_divisor),
+                },
+                "trend": trend,
+            })
+
         @app.route("/api/history")
         def api_history():
             days_param = request.args.get("days", 7)
@@ -266,7 +398,10 @@ class WebServer:
             if is_all:
                 days = 0  # placeholder, actual count computed later
             else:
-                days = min(max(int(days_param), 1), 90)
+                try:
+                    days = min(max(int(days_param), 1), 90)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "days must be an integer or 'all'"}), 400
 
             end = date.today()
 
@@ -279,7 +414,6 @@ class WebServer:
 
             actual_days = max(1, (end - start).days + 1)
 
-            daily_totals = self._recorder.get_daily_totals(start, end)
             tag_daily = self._recorder.get_daily_tag_breakdown(start, end)
             range_apps = self._recorder.get_range_app_breakdown(start, end)
 
@@ -289,7 +423,11 @@ class WebServer:
 
             # Total contains every non-idle tag. Work and Indie remain explicit
             # instead of silently folding Other/custom tags into Work.
-            date_map_total = {d: s for d, s in daily_totals}
+            # The tag aggregate already contains every non-idle segment. Reuse
+            # it for totals and charts instead of scanning time_segments again.
+            date_map_total = {
+                d: sum(tags.values()) for d, tags in tag_daily.items()
+            }
             trend = []
             d = start
             while d <= end:
@@ -323,15 +461,24 @@ class WebServer:
                     "pct": round((total_s / grand_total * 100) if grand_total > 0 else 0, 1),
                 })
 
-            # Tag trend (per-tag daily breakdown for dynamic trend lines)
-            tag_trend_raw = self._recorder.get_daily_tag_trend(start, end)
+            # Tag trend and weekly summary both derive from the same daily
+            # aggregate above; avoid two more identical database scans.
             tag_trend = [
-                {"date": r["date"], "tag": r["tag"], "seconds": r["seconds"]}
-                for r in tag_trend_raw
+                {"date": d, "tag": tag, "seconds": seconds}
+                for d in sorted(tag_daily)
+                for tag, seconds in sorted(tag_daily[d].items())
             ]
-
-            # Period tag summary (weekly/monthly)
-            period_summary = self._recorder.get_period_tag_summary(start, end, "week")
+            period_tag = {}
+            for d, tags in tag_daily.items():
+                iso = date.fromisoformat(d).isocalendar()
+                period = f"{iso[0]}-W{iso[1]:02d}"
+                for tag, seconds in tags.items():
+                    key = (period, tag)
+                    period_tag[key] = period_tag.get(key, 0) + seconds
+            period_summary = [
+                {"period": period, "tag": tag, "seconds": round(seconds, 1)}
+                for (period, tag), seconds in sorted(period_tag.items())
+            ]
 
             return jsonify({
                 "cards": {
@@ -346,6 +493,93 @@ class WebServer:
                 "per_app": per_app,
                 "tag_trend": tag_trend,
                 "period_summary": period_summary,
+            })
+
+        # ---- API: History heatmap -------------------------------------
+        @app.route("/api/history/heatmap")
+        def api_history_heatmap():
+            days = request.args.get("days", 365, type=int)
+            days = min(max(days or 365, 1), 730)
+            end = date.today()
+            start = end - timedelta(days=days - 1)
+            daily_tags = self._recorder.get_daily_tag_breakdown(start, end)
+
+            # Pad to whole Monday-Sunday weeks so the frontend can render a
+            # GitHub-style grid without special cases at either edge.
+            grid_start = start - timedelta(days=start.weekday())
+            grid_end = end + timedelta(days=6 - end.weekday())
+            cells = []
+            cursor = grid_start
+            while cursor <= grid_end:
+                iso = cursor.isoformat()
+                in_range = start <= cursor <= end
+                tags = daily_tags.get(iso, {}) if in_range else {}
+                total = sum(tags.values())
+                cells.append({
+                    "date": iso if in_range else None,
+                    "total_seconds": round(total, 1),
+                    "work_seconds": round(tags.get("Work", 0), 1),
+                    "indie_seconds": round(tags.get("Indie", 0), 1),
+                    "other_seconds": round(
+                        sum(v for k, v in tags.items() if k not in ("Work", "Indie")),
+                        1,
+                    ),
+                })
+                cursor += timedelta(days=1)
+
+            active_cells = [c for c in cells if c["date"] and c["total_seconds"] > 0]
+            return jsonify({
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "days": cells,
+                "days_with_data": len(active_cells),
+                "total_seconds": round(sum(c["total_seconds"] for c in active_cells), 1),
+                "work_seconds": round(sum(c["work_seconds"] for c in active_cells), 1),
+                "indie_seconds": round(sum(c["indie_seconds"] for c in active_cells), 1),
+            })
+
+        # ---- API: One history day -------------------------------------
+        @app.route("/api/history/day")
+        def api_history_day():
+            date_param = request.args.get("date", "")
+            try:
+                selected = date.fromisoformat(date_param)
+            except (TypeError, ValueError):
+                return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+            if selected > date.today():
+                return jsonify({"error": "date cannot be in the future"}), 400
+
+            selected_iso = selected.isoformat()
+            tags = self._recorder.get_today_tag_distribution(selected_iso)
+            apps = self._recorder.get_today_app_breakdown(selected_iso)
+            timeline = self._recorder.get_today_timeline(selected_iso)
+            total_seconds = sum(r["seconds"] for r in tags)
+            idle_seconds = self._recorder.get_today_idle_time(selected_iso)
+
+            for row in tags:
+                row["seconds"] = round(row["seconds"], 1)
+                row["duration"] = _fmt_duration(row["seconds"])
+                row["percent"] = round(
+                    row["seconds"] / total_seconds * 100 if total_seconds else 0, 1
+                )
+            for row in apps:
+                row["seconds"] = round(row["seconds"], 1)
+                row["duration"] = _fmt_duration(row["seconds"])
+                row["percent"] = round(
+                    row["seconds"] / total_seconds * 100 if total_seconds else 0, 1
+                )
+            for row in timeline:
+                row["duration"] = _fmt_duration(row["seconds"])
+
+            return jsonify({
+                "date": selected_iso,
+                "total_seconds": round(total_seconds, 1),
+                "total": _fmt_duration(total_seconds),
+                "idle_seconds": round(idle_seconds, 1),
+                "idle": _fmt_duration(idle_seconds),
+                "tags": tags,
+                "apps": apps,
+                "timeline": timeline,
             })
 
         # ---- API: Events ----
@@ -454,9 +688,14 @@ class WebServer:
 
         @app.route("/api/settings", methods=["PUT"])
         def api_update_settings():
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "JSON object required"}), 400
             if "idle_threshold" in data:
-                self._config.idle_threshold = int(data["idle_threshold"])
+                try:
+                    self._config.idle_threshold = int(data["idle_threshold"])
+                except (TypeError, ValueError):
+                    return jsonify({"error": "idle_threshold must be an integer"}), 400
             if "auto_start_minimized" in data:
                 self._config.auto_start_minimized = bool(data["auto_start_minimized"])
             if "auto_start_with_windows" in data:
@@ -479,6 +718,9 @@ class WebServer:
                 for proc, rules in data["url_tag_rules"].items():
                     self._config.set_url_tag_rules(proc, rules)
             self._config.save()
+            refresh = getattr(self._engine, "refresh_monitored_processes", None)
+            if refresh:
+                refresh()
             return jsonify({"status": "ok"})
 
         # ---- API: Tags CRUD ----
@@ -488,7 +730,9 @@ class WebServer:
 
         @app.route("/api/tags", methods=["POST"])
         def api_add_tag():
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "JSON object required"}), 400
             name = data.get("name", "").strip()
             color = data.get("color", "#565f89")
             if not name:
@@ -501,7 +745,9 @@ class WebServer:
 
         @app.route("/api/tags/<int:tag_id>", methods=["PUT"])
         def api_update_tag(tag_id):
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "JSON object required"}), 400
             old_tag = next((t for t in self._recorder.list_tags() if t["id"] == tag_id), None)
             ok = self._recorder.update_tag(tag_id, data.get("name"), data.get("color"))
             if ok:
@@ -524,7 +770,9 @@ class WebServer:
         # ---- API: App Tag (quick assign from App Breakdown) ----
         @app.route("/api/app-tag", methods=["PUT"])
         def api_set_app_tag():
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "JSON object required"}), 400
             proc = data.get("process_name", "").strip()
             display_name = data.get("display_name", "").strip()
             project = data.get("project", "").strip()
@@ -537,6 +785,9 @@ class WebServer:
             # Add process to monitored list if not already there
             if not self._config.is_monitored(proc):
                 self._config.add_process(proc, display_name or proc)
+                refresh = getattr(self._engine, "refresh_monitored_processes", None)
+                if refresh:
+                    refresh()
             # Persist an exact app/project override. It has higher priority than
             # keyword and process rules, so the next poll cannot revert it.
             self._config.set_app_tag_override(proc, project, display_name, tag)
@@ -557,7 +808,9 @@ class WebServer:
 
         @app.route("/api/tag-rules", methods=["PUT"])
         def api_set_tag_rules():
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "JSON object required"}), 400
             if "process_tags" in data:
                 for proc, tag in data["process_tags"].items():
                     self._config.set_process_tag(proc, tag)
@@ -590,8 +843,13 @@ class WebServer:
         def api_export():
             start_str = request.args.get("start")
             end_str = request.args.get("end")
-            start = date.fromisoformat(start_str) if start_str else None
-            end = date.fromisoformat(end_str) if end_str else None
+            try:
+                start = date.fromisoformat(start_str) if start_str else None
+                end = date.fromisoformat(end_str) if end_str else None
+            except ValueError:
+                return jsonify({"error": "start and end must be ISO dates"}), 400
+            if start and end and start > end:
+                return jsonify({"error": "start must not be after end"}), 400
 
             buf = io.StringIO()
             buf.write("\ufeff")  # BOM for Excel
@@ -650,10 +908,11 @@ class WebServer:
                 logger.warning("POST /api/chrome-url invalid JSON from %s", request.remote_addr)
                 return jsonify({"error": "Invalid JSON"}), 400
             url = data.get("url", "")
+            title = data.get("title", "")
             if not url:
                 logger.warning("POST /api/chrome-url missing url field")
                 return jsonify({"error": "url required"}), 400
-            self._chrome_url_cache.set_url(url)
+            self._chrome_url_cache.set_url(url, title)
             logger.info("POST /api/chrome-url url=%s from=%s", url, request.remote_addr)
             return jsonify({"status": "ok"})
 
@@ -668,8 +927,9 @@ class WebServer:
     def start(self):
         if self._thread is not None:
             return
+        self._http_server = make_server(HOST, PORT, self._app, threaded=True)
         self._thread = threading.Thread(
-            target=lambda: self._app.run(host=HOST, port=PORT, debug=False, use_reloader=False),
+            target=self._http_server.serve_forever,
             name="WebServer",
             daemon=True,
         )
@@ -677,8 +937,12 @@ class WebServer:
         logger.info("Web server listening on http://%s:%d", HOST, PORT)
 
     def stop(self):
-        # Flask dev server doesn't have a clean shutdown API;
-        # it's a daemon thread so it'll die with the process.
+        if self._http_server:
+            self._http_server.shutdown()
+            self._http_server.server_close()
+            self._http_server = None
+        if self._thread:
+            self._thread.join(timeout=3)
         self._thread = None
         logger.info("Web server stopped.")
 

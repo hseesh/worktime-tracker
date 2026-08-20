@@ -8,7 +8,10 @@ from pathlib import Path
 
 import config
 import tracker.time_recorder as time_recorder_module
-from tracker.codex_activity_manager import CodexActivityManager
+from tracker.codex_activity_manager import (
+    CodexActivityManager,
+    MAX_FUTURE_SKEW_SECONDS,
+)
 from tracker.time_recorder import TimeRecorder
 
 
@@ -91,6 +94,39 @@ class TestCodexActivity(unittest.TestCase):
         self.assertEqual(current["project"], indie)
         self.assertEqual(current["project_name"], "Assets (Indie)")
 
+    def test_session_project_switch_deactivates_old_project(self):
+        old_project = r"D:\Projects\OldProject"
+        new_project = r"D:\Data\unity\P1-c\Assets"
+        self.manager.handle_event("SessionStart", "s1", old_project, self._now(-2))
+        self.manager.handle_event("UserPromptSubmit", "s1", new_project, self._now(-1))
+
+        self.assertEqual(
+            [p["project"] for p in self.manager.get_active_projects()],
+            [new_project],
+        )
+
+        self.manager.handle_event("Stop", "s1", new_project, self._now())
+        self.assertIsNone(self.manager.get_current_active_project())
+
+    def test_small_future_skew_is_clamped_to_now(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        self.manager.handle_event(
+            "SessionStart", "s1", project, self._now(MAX_FUTURE_SKEW_SECONDS)
+        )
+
+        active = self.manager.get_current_active_project()
+        self.assertIsNotNone(active)
+        self.assertGreaterEqual(active["idle_seconds"], 0)
+
+    def test_active_project_remains_active_until_stop(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        self.manager.handle_event("SessionStart", "s1", project, self._now(-3600))
+
+        self.assertEqual(self.manager.get_current_active_project()["project"], project)
+
+        self.manager.handle_event("Stop", "s1", project, self._now())
+        self.assertIsNone(self.manager.get_current_active_project())
+
     def test_validation(self):
         ok, _, parsed = CodexActivityManager.validate_event(
             "PostToolUse", "s1", r"D:\Projects\X", "2026-07-20T10:00:00Z"
@@ -104,8 +140,15 @@ class TestCodexActivity(unittest.TestCase):
         bad_path, _, _ = CodexActivityManager.validate_event(
             "PreToolUse", "s1", "relative/path", "2026-07-20T10:00:00Z"
         )
+        future, _, _ = CodexActivityManager.validate_event(
+            "PreToolUse",
+            "s1",
+            r"D:\Projects\X",
+            (datetime.now(timezone.utc) + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS + 1)).isoformat(),
+        )
         self.assertFalse(bad_event)
         self.assertFalse(bad_path)
+        self.assertFalse(future)
 
 
 if __name__ == "__main__":

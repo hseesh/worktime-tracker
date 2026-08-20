@@ -5,6 +5,7 @@ import io
 import os
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 import config
@@ -93,6 +94,24 @@ class TestWebConsistency(unittest.TestCase):
         self.assertEqual({r["Tag"] for r in rows}, {"Work", "Indie", "Fun"})
         self.assertIn("Assets (Indie)", {r["DisplayName"] for r in rows})
 
+    def test_live_dashboard_cards_use_current_segment_totals(self):
+        self.recorder.add_time("Devin.exe", "Devin", 12, tag="Indie")
+        self.recorder.add_time("IDE.exe", "IDE", 8, tag="Work")
+        self.recorder.add_focus_time("Indie", 7)
+        self.recorder.add_focus_time("Work", 3)
+
+        response = self.client.get("/api/dashboard/live")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        cards = response.get_json()["cards"]
+        self.assertEqual(cards["total"], "20s")
+        self.assertEqual(cards["indie"], "12s")
+        self.assertEqual(cards["work"], "8s")
+        self.assertEqual(cards["indie_pct"], 60)
+        self.assertEqual(cards["indie_focus"], "7s")
+        self.assertEqual(cards["work_focus"], "3s")
+
     def test_app_tag_quick_assign_updates_exact_project_immediately(self):
         self.recorder.add_time(
             "Devin.exe", "Devin [Assets]", 10, "Assets", "Indie"
@@ -122,6 +141,33 @@ class TestWebConsistency(unittest.TestCase):
             ],
             "Other",
         )
+
+    def test_heatmap_and_day_detail_use_segment_totals(self):
+        self.recorder.add_time(
+            "Devin.exe", "Devin [zs-cloud]", 20, "zs-cloud", "Work"
+        )
+        self.recorder.add_time(
+            "Devin.exe", "Devin [Assets]", 10, "Assets", "Indie"
+        )
+        self.recorder.add_codex_time(
+            r"D:\Data\unity\P1-c\Assets", "Assets (Indie)", 30, "Indie"
+        )
+        self.recorder.add_idle_time(5)
+
+        today = date.today().isoformat()
+        heatmap = self.client.get("/api/history/heatmap?days=365").get_json()
+        day_cell = next(cell for cell in heatmap["days"] if cell["date"] == today)
+        self.assertEqual(len(heatmap["days"]), 371)
+        self.assertAlmostEqual(day_cell["total_seconds"], 60)
+        self.assertAlmostEqual(day_cell["work_seconds"], 20)
+        self.assertAlmostEqual(day_cell["indie_seconds"], 40)
+
+        detail = self.client.get(f"/api/history/day?date={today}").get_json()
+        self.assertEqual(detail["date"], today)
+        self.assertAlmostEqual(detail["total_seconds"], 60)
+        self.assertAlmostEqual(detail["idle_seconds"], 5)
+        self.assertEqual({r["tag"] for r in detail["tags"]}, {"Work", "Indie"})
+        self.assertIn("Assets (Indie)", {r["display_name"] for r in detail["apps"]})
 
 
 if __name__ == "__main__":

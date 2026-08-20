@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from config import AppConfig
 from tracker.chrome_url_cache import ChromeUrlCache
@@ -40,53 +40,27 @@ class TrackingEngine:
         set_monitored_processes(set(config.processes.keys()))
 
     def _is_codex_foreground(self) -> bool:
-        """Check if any Codex process window is visible and not minimized.
-
-        Uses EnumWindows instead of GetForegroundWindow — the window doesn't
-        need to have keyboard focus, just be visible (not minimized, not hidden).
-        """
-        try:
-            import win32gui
-            import win32process
-            import psutil
-
-            found = [False]
-
-            def _enum_callback(hwnd, _):
-                if not win32gui.IsWindowVisible(hwnd):
-                    return True
-                if win32gui.IsIconic(hwnd):
-                    return True
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                if pid == 0:
-                    return True
-                try:
-                    proc_name = psutil.Process(pid).name().lower()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    return True
-                if proc_name in _CODEX_PROCESSES:
-                    found[0] = True
-                    return False
-                return True
-
-            win32gui.EnumWindows(_enum_callback, None)
-            return found[0]
-        except Exception as e:
-            logger.error("EnumWindows error: %s", e)
-            return False
+        """Return True when Codex is selected as an active visible window."""
+        return any(
+            fg.process_name.lower() in _CODEX_PROCESSES
+            for fg in self.get_current_windows()
+        )
 
     def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._last_ts = time.monotonic()
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._last_ts = time.monotonic()
         self._schedule_poll()
 
     def stop(self):
-        self._running = False
-        if self._timer:
-            self._timer.cancel()
+        with self._lock:
+            self._running = False
+            timer = self._timer
             self._timer = None
+        if timer:
+            timer.cancel()
         with self._lock:
             self._current_windows = []
             self._last_fg = None
@@ -99,6 +73,10 @@ class TrackingEngine:
         """Return the windows selected for the most recent per-monitor sample."""
         with self._lock:
             return list(self._current_windows)
+
+    def refresh_monitored_processes(self):
+        """Apply settings changes to multi-monitor window selection immediately."""
+        set_monitored_processes(set(self._config.processes.keys()))
 
     # ------------------------------------------------------------------ #
 
@@ -137,21 +115,15 @@ class TrackingEngine:
 
                 self._current_windows = list(windows)
 
-                # Identify the focused window for tag deduplication
+                # Identify the focused window. Chrome's extension can only
+                # report the active Chrome window, so URL-based rules must not
+                # be applied to a visible but unfocused Chrome window.
                 focused = get_foreground_info()
-                focused_tag = None
                 focused_hwnd = 0
                 if focused:
                     focused_hwnd = focused.hwnd
-                    focused_tag = self._compute_tag(focused)
 
-                # Record time for each visible window, skipping same-tag dupes
-                for fg in windows:
-                    if focused_tag and fg.hwnd != focused_hwnd:
-                        fg_tag = self._compute_tag(fg)
-                        if fg_tag and fg_tag == focused_tag:
-                            continue
-                    self._record_window(fg, elapsed)
+                self._record_selected_windows(windows, elapsed, focused_hwnd)
 
                 # Keep the focused window for display
                 if focused:
@@ -162,6 +134,41 @@ class TrackingEngine:
             logger.error("Poll error: %s", e, exc_info=True)
         finally:
             self._schedule_poll()
+
+    def _record_selected_windows(
+        self,
+        windows: List[ForegroundInfo],
+        elapsed: float,
+        focused_hwnd: int,
+    ):
+        """Record selected windows, counting all Codex sessions as one activity."""
+        codex_recorded = False
+        tags_seen = set()
+        focused_codex_present = any(
+            fg.process_name.lower() in _CODEX_PROCESSES and fg.hwnd == focused_hwnd
+            for fg in windows
+        )
+        for fg in windows:
+            if fg.process_name.lower() in _CODEX_PROCESSES:
+                # Prefer the focused Codex window as the single representative,
+                # so its time also contributes to the focus metric.
+                if focused_codex_present and fg.hwnd != focused_hwnd:
+                    continue
+                # A Codex window selected on another display does not need
+                # keyboard focus, but all sessions still share one timer.
+                if codex_recorded:
+                    continue
+                codex_recorded = True
+            tag = self._record_window(
+                fg, elapsed, fg.hwnd == focused_hwnd, record_tag_total=False
+            )
+            if tag:
+                tags_seen.add(tag)
+
+        # One wall-clock sample per tag, even when two same-tag apps occupy
+        # different monitors. App/project segments remain independently stored.
+        for tag in tags_seen:
+            self._recorder.add_tag_time(tag, elapsed)
 
     def _compute_tag(self, fg: ForegroundInfo) -> Optional[str]:
         """Compute the tag for a window without recording (for dedup checks)."""
@@ -176,15 +183,22 @@ class TrackingEngine:
                 if override:
                     tag = override
                 return tag
-            _, tag = self._classify_codex_from_hook("", fg.window_title)
-            return tag
+            # Codex is intentionally not tracked until its local HTTP hook
+            # identifies an active project.
+            return None
         return self._resolve_tag_with_url(fg)
 
-    def _record_window(self, fg: ForegroundInfo, elapsed: float):
+    def _record_window(
+        self,
+        fg: ForegroundInfo,
+        elapsed: float,
+        is_focused: bool = True,
+        record_tag_total: bool = True,
+    ) -> Optional[str]:
         """Record elapsed time for a single visible window."""
         display_name = self._config.get_display_name(fg.process_name, fg.window_title)
 
-        # Codex visible via EnumWindows — record to active hook project
+        # Codex is recorded only after a local HTTP hook marks a project active.
         if fg.process_name.lower() in _CODEX_PROCESSES and self._codex_manager:
             active_proj = self._codex_manager.get_current_active_project()
             if active_proj:
@@ -196,29 +210,52 @@ class TrackingEngine:
                 )
                 if override:
                     tag = override
-                self._recorder.add_codex_time(proj_path, proj_name, elapsed, tag)
-                return
-            display_name, tag = self._classify_codex_from_hook(display_name, fg.window_title)
+                self._recorder.add_codex_time(
+                    proj_path, proj_name, elapsed, tag, record_tag_total=record_tag_total
+                )
+                if is_focused:
+                    self._recorder.add_focus_time(tag, elapsed)
+                return tag
+            return None
         else:
-            tag = self._resolve_tag_with_url(fg)
+            tag = self._resolve_tag_with_url(fg, use_chrome_url=is_focused)
 
         # Chrome with no matching URL/keyword rule → skip recording
         if tag is None:
-            return
+            return None
 
         if display_name is None:
             other_name = f"Other ({fg.process_name})"
-            self._recorder.add_time(fg.process_name, other_name, elapsed, fg.project, "Other")
-            return
+            self._recorder.add_time(
+                fg.process_name,
+                other_name,
+                elapsed,
+                fg.project,
+                "Other",
+                record_tag_total=record_tag_total,
+            )
+            return "Other"
 
         display_name = self._build_display_name(display_name, fg.project)
-        tag = self._config.resolve_app_tag(
-            fg.process_name,
-            fg.window_title,
-            fg.project,
-            display_name,
+        # An exact App Breakdown override wins over automatic classification.
+        # Otherwise retain the URL-derived tag instead of overwriting it with
+        # the process default (which previously turned Chrome Indie pages into Work).
+        override = self._config.get_app_tag_override(
+            fg.process_name, fg.project, display_name
         )
-        self._recorder.add_time(fg.process_name, display_name, elapsed, fg.project, tag)
+        if override:
+            tag = override
+        self._recorder.add_time(
+            fg.process_name,
+            display_name,
+            elapsed,
+            fg.project,
+            tag,
+            record_tag_total=record_tag_total,
+        )
+        if is_focused:
+            self._recorder.add_focus_time(tag, elapsed)
+        return tag
 
     def _flush(self):
         """Record any pending time for the last known foreground process."""
@@ -226,14 +263,18 @@ class TrackingEngine:
         # here.  This method exists for potential future batch-flush logic.
         pass
 
-    def _resolve_tag_with_url(self, fg: ForegroundInfo) -> Optional[str]:
+    def _resolve_tag_with_url(
+        self, fg: ForegroundInfo, use_chrome_url: bool = True
+    ) -> Optional[str]:
         """Resolve tag: try URL domain rules, then keyword rules.
 
         For Chrome, returns None if no rule matches (skip recording).
         For other processes, falls back to process default tag.
         """
         if self._chrome_url_cache and fg.process_name.lower() == "chrome.exe":
-            url = self._chrome_url_cache.get_url()
+            url = self._chrome_url_cache.get_url(
+                fg.window_title, allow_active_fallback=use_chrome_url
+            )
             if url:
                 url_tag = self._config.resolve_url_tag(fg.process_name, url)
                 if url_tag:
@@ -258,21 +299,3 @@ class TrackingEngine:
         if not project or not display_name:
             return display_name
         return f"{display_name} [{project}]"
-
-    def _classify_codex_from_hook(self, display_name: str, window_title: str = "") -> Tuple[str, str]:
-        """Use Codex hook active project to classify tag for Codex foreground time.
-
-        Returns (display_name, tag).
-        """
-        if not self._codex_manager:
-            tag = self._config.resolve_tag("ChatGPT.exe", window_title)
-            return display_name, tag
-        active = self._codex_manager.get_active_projects()
-        indie_active = any(p["active"] and "(Indie)" in p["project_name"] for p in active)
-        work_active = any(p["active"] and "(Work)" in p["project_name"] for p in active)
-        if indie_active:
-            return display_name, "Indie"
-        if work_active:
-            return display_name, "Work"
-        tag = self._config.resolve_tag("ChatGPT.exe", window_title)
-        return display_name, tag

@@ -53,6 +53,8 @@ def get_foreground_info() -> Optional[ForegroundInfo]:
             proc_name = proc.name()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return None
+        if not title or title in _SKIP_TITLES or proc_name.lower() in _SKIP_PROCESSES:
+            return None
 
         return ForegroundInfo(
             process_name=proc_name,
@@ -146,6 +148,12 @@ def get_visible_windows() -> List[ForegroundInfo]:
                 try:
                     fg_name = psutil.Process(fg_pid).name()
                     fg_title = win32gui.GetWindowText(fg_hwnd)
+                    if (
+                        not fg_title
+                        or fg_title in _SKIP_TITLES
+                        or fg_name.lower() in _SKIP_PROCESSES
+                    ):
+                        raise ValueError("untrackable foreground window")
                     result[fg_mon] = ForegroundInfo(
                         process_name=fg_name,
                         window_title=fg_title,
@@ -154,7 +162,7 @@ def get_visible_windows() -> List[ForegroundInfo]:
                         monitor_index=fg_mon,
                         hwnd=int(fg_hwnd),
                     )
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
                     pass
 
     # 2. For other monitors, find the best visible window

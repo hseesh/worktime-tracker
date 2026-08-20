@@ -12,5 +12,7 @@ if not exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\pip.exe" install -r requirements.txt -q
 )
 
-:: Launch
-".venv\Scripts\python.exe" main.py
+:: Launch independently without attaching the tracker to this console window.
+:: The tracker remains available in the system tray; use its Quit menu item to stop it.
+start "" /D "%~dp0" ".venv\Scripts\pythonw.exe" main.py
+exit /b

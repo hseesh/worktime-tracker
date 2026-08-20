@@ -4,7 +4,6 @@ Run:  python main.py
 """
 
 import logging
-import os
 import sys
 import threading
 
@@ -12,6 +11,7 @@ from config import AppConfig
 from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.codex_event_server import CodexEventServer
+from tracker.single_instance import SingleInstanceGuard
 from tracker.time_recorder import TimeRecorder
 from tracker.tracking_engine import TrackingEngine
 from web.server import WebServer, HOST as WEB_HOST, PORT as WEB_PORT
@@ -44,7 +44,6 @@ def _create_tray_icon():
 
     def on_quit(icon, item):
         icon.stop()
-        os._exit(0)
 
     menu = pystray.Menu(
         pystray.MenuItem("Open Web UI", on_open, default=True),
@@ -56,6 +55,12 @@ def _create_tray_icon():
 
 
 def main():
+    instance_guard = SingleInstanceGuard()
+    if not instance_guard.acquire():
+        logger.info("WorkTime Tracker is already running; exiting duplicate startup.")
+        instance_guard.release()
+        return
+
     config = AppConfig()
     config._set_registry_autostart(config.auto_start_with_windows)
 
@@ -93,10 +98,13 @@ def main():
         except KeyboardInterrupt:
             pass
 
-    engine.stop()
-    codex_server.stop()
-    web_server.stop()
-    logger.info("WorkTime Tracker stopped.")
+    try:
+        engine.stop()
+        codex_server.stop()
+        web_server.stop()
+        logger.info("WorkTime Tracker stopped.")
+    finally:
+        instance_guard.release()
 
 
 if __name__ == "__main__":

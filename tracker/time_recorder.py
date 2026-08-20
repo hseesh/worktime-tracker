@@ -47,6 +47,27 @@ CREATE TABLE IF NOT EXISTS time_segments (
 );
 """
 
+_CREATE_FOCUS_SQL = """
+CREATE TABLE IF NOT EXISTS focus_time_records (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT    NOT NULL,
+    tag         TEXT    NOT NULL,
+    seconds     REAL    NOT NULL DEFAULT 0,
+    updated_at  TEXT    NOT NULL,
+    UNIQUE(date, tag)
+);
+"""
+
+_CREATE_TAG_TOTALS_SQL = """
+CREATE TABLE IF NOT EXISTS tag_time_records (
+    date        TEXT    NOT NULL,
+    tag         TEXT    NOT NULL,
+    seconds     REAL    NOT NULL DEFAULT 0,
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (date, tag)
+);
+"""
+
 _MIGRATE_ADD_PROJECT_SQL = """
 CREATE TABLE IF NOT EXISTS time_records_new (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,18 +129,70 @@ class TimeRecorder:
     def _init_db(self):
         conn = self._conn()
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_SQL)
             conn.executescript(_CREATE_CODEX_SQL)
             conn.execute(_CREATE_TAGS_SQL)
             conn.execute(_CREATE_SEGMENTS_SQL)
+            conn.execute(_CREATE_FOCUS_SQL)
+            conn.execute(_CREATE_TAG_TOTALS_SQL)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_time_segments_date_tag "
+                "ON time_segments (date, tag)"
+            )
             self._migrate_add_project(conn)
             self._migrate_add_tag(conn)
             self._migrate_add_segment_project(conn)
+            # History range app breakdowns read these fields together. Keep a
+            # covering index so the aggregation does not fetch every segment
+            # row from the table for each History request.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_time_segments_history_app "
+                "ON time_segments (date, tag, display_name, process_name, project, seconds)"
+            )
+            self._migrate_current_tag_totals(conn)
             self._seed_default_tags(conn)
             self._migrate_tag_from_display_name(conn)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_current_tag_totals(conn):
+        """Backfill today's de-duplicated tag totals from legacy segments once."""
+        today = date.today().isoformat()
+        existing = conn.execute(
+            "SELECT 1 FROM tag_time_records WHERE date = ? LIMIT 1", (today,)
+        ).fetchone()
+        if existing:
+            return
+        rows = conn.execute(
+            """
+            SELECT start_time, end_time, tag
+            FROM time_segments
+            WHERE date = ? AND tag != 'Idle'
+            ORDER BY tag, start_time, end_time
+            """,
+            (today,),
+        ).fetchall()
+        by_tag = {}
+        for row in rows:
+            by_tag.setdefault(row["tag"], []).append(
+                (datetime.fromisoformat(row["start_time"]), datetime.fromisoformat(row["end_time"]))
+            )
+        now = datetime.now().isoformat(timespec="seconds")
+        for tag, intervals in by_tag.items():
+            merged = []
+            for start, end in intervals:
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            seconds = sum((end - start).total_seconds() for start, end in merged)
+            conn.execute(
+                "INSERT OR REPLACE INTO tag_time_records (date, tag, seconds, updated_at) VALUES (?, ?, ?, ?)",
+                (today, tag, seconds, now),
+            )
 
     @staticmethod
     def _migrate_add_project(conn):
@@ -197,8 +270,9 @@ class TimeRecorder:
 
     @staticmethod
     def _conn() -> sqlite3.Connection:
-        conn = sqlite3.connect(str(DB_FILE))
+        conn = sqlite3.connect(str(DB_FILE), timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     @classmethod
@@ -277,37 +351,105 @@ class TimeRecorder:
     #  Write                                                              #
     # ------------------------------------------------------------------ #
 
-    def add_time(self, process_name: str, display_name: str, seconds: float, project: str = "", tag: str = "Other"):
-        """Accumulate *seconds* for *process_name* on today's date."""
-        today = date.today().isoformat()
-        now = datetime.now()
-        now_iso = now.isoformat(timespec="seconds")
-        start = now - timedelta(seconds=seconds)
-        start_iso = start.isoformat(timespec="seconds")
-        conn = self._conn()
-        try:
+    @staticmethod
+    def _split_interval(start: datetime, end: datetime):
+        """Yield pieces that do not cross a local calendar-day boundary."""
+        cursor = start
+        while cursor < end:
+            next_midnight = (
+                cursor.replace(hour=0, minute=0, second=0, microsecond=0)
+                + timedelta(days=1)
+            )
+            chunk_end = min(next_midnight, end)
+            yield cursor, chunk_end
+            cursor = chunk_end
+
+    @staticmethod
+    def _upsert_tag_total_conn(conn, tag: str, start: datetime, end: datetime):
+        if not tag or tag == "Idle" or end <= start:
+            return
+        updated_at = end.isoformat(timespec="seconds")
+        for chunk_start, chunk_end in TimeRecorder._split_interval(start, end):
             conn.execute(
                 """
-                INSERT INTO time_records (date, process_name, display_name, project, tag, seconds, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(date, process_name, project)
-                DO UPDATE SET
-                    seconds    = seconds + excluded.seconds,
-                    display_name = excluded.display_name,
-                    tag         = excluded.tag,
+                INSERT INTO tag_time_records (date, tag, seconds, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(date, tag) DO UPDATE SET
+                    seconds = seconds + excluded.seconds,
                     updated_at = excluded.updated_at
                 """,
-                (today, process_name, display_name, project, tag, seconds, now_iso),
+                (
+                    chunk_start.date().isoformat(),
+                    tag,
+                    (chunk_end - chunk_start).total_seconds(),
+                    updated_at,
+                ),
             )
-            # time_segments is the canonical source for dashboard, history and export.
-            conn.execute(
-                """
-                INSERT INTO time_segments
-                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (today, start_iso, now_iso, process_name, display_name, project, tag, seconds),
-            )
+
+    def add_tag_time(self, tag: str, seconds: float):
+        """Add one de-duplicated sample for a tag (once per monitor poll)."""
+        if seconds <= 0 or not tag or tag == "Idle":
+            return
+        now = datetime.now()
+        conn = self._conn()
+        try:
+            self._upsert_tag_total_conn(conn, tag, now - timedelta(seconds=seconds), now)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_time(
+        self,
+        process_name: str,
+        display_name: str,
+        seconds: float,
+        project: str = "",
+        tag: str = "Other",
+        record_tag_total: bool = True,
+    ):
+        """Accumulate *seconds* for *process_name* on today's date."""
+        if seconds <= 0:
+            return
+        now = datetime.now()
+        start = now - timedelta(seconds=seconds)
+        conn = self._conn()
+        try:
+            for chunk_start, chunk_end in self._split_interval(start, now):
+                chunk_seconds = (chunk_end - chunk_start).total_seconds()
+                chunk_date = chunk_start.date().isoformat()
+                end_iso = chunk_end.isoformat(timespec="seconds")
+                conn.execute(
+                    """
+                    INSERT INTO time_records (date, process_name, display_name, project, tag, seconds, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date, process_name, project)
+                    DO UPDATE SET
+                        seconds    = seconds + excluded.seconds,
+                        display_name = excluded.display_name,
+                        tag         = excluded.tag,
+                        updated_at = excluded.updated_at
+                    """,
+                    (chunk_date, process_name, display_name, project, tag, chunk_seconds, end_iso),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO time_segments
+                        (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk_date,
+                        chunk_start.isoformat(timespec="seconds"),
+                        end_iso,
+                        process_name,
+                        display_name,
+                        project,
+                        tag,
+                        chunk_seconds,
+                    ),
+                )
+            if record_tag_total:
+                self._upsert_tag_total_conn(conn, tag, start, now)
             conn.commit()
         finally:
             conn.close()
@@ -336,16 +478,40 @@ class TimeRecorder:
         return [dict(r) for r in rows]
 
     def get_today_total(self) -> float:
-        today = date.today().isoformat()
+        return sum(row["seconds"] for row in self.get_today_tag_distribution())
+
+    def get_today_live_totals(self) -> Dict[str, float]:
+        """Return dashboard totals with same-tag overlap removed."""
+        tag_totals = {
+            row["tag"]: row["seconds"] for row in self.get_today_tag_distribution()
+        }
         conn = self._conn()
         try:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(seconds), 0) AS total FROM time_segments WHERE date = ? AND tag != 'Idle'",
+            today = date.today().isoformat()
+            focus_rows = conn.execute(
+                """
+                SELECT tag, COALESCE(SUM(seconds), 0) AS seconds
+                FROM focus_time_records
+                WHERE date = ? AND tag IN ('Indie', 'Work')
+                GROUP BY tag
+                """,
                 (today,),
-            ).fetchone()
+            ).fetchall()
         finally:
             conn.close()
-        return row["total"] if row else 0.0
+        totals = {
+            "total": sum(tag_totals.values()),
+            "indie": tag_totals.get("Indie", 0.0),
+            "work": tag_totals.get("Work", 0.0),
+        }
+        totals["indie_focus"] = 0.0
+        totals["work_focus"] = 0.0
+        for focus in focus_rows:
+            if focus["tag"] == "Indie":
+                totals["indie_focus"] = focus["seconds"]
+            elif focus["tag"] == "Work":
+                totals["work_focus"] = focus["seconds"]
+        return totals
 
     def get_range_summary(
         self, start: date, end: date
@@ -422,17 +588,27 @@ class TimeRecorder:
         return [(r["date"], r["total"]) for r in rows]
 
     def get_daily_tag_breakdown(self, start: date, end: date) -> Dict[str, Dict[str, float]]:
-        """Return {date_iso: {tag: seconds}} for [start, end]."""
+        """Return de-duplicated {date_iso: {tag: seconds}} for [start, end]."""
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments WHERE date >= ? AND date <= ? AND tag != 'Idle' GROUP BY date, tag ORDER BY date",
+                "SELECT date, tag, seconds FROM tag_time_records WHERE date >= ? AND date <= ? ORDER BY date",
                 (start.isoformat(), end.isoformat()),
+            ).fetchall()
+            fallback = conn.execute(
+                """
+                SELECT date, tag, SUM(seconds) AS seconds
+                FROM time_segments
+                WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                  AND date NOT IN (SELECT DISTINCT date FROM tag_time_records WHERE date >= ? AND date <= ?)
+                GROUP BY date, tag ORDER BY date
+                """,
+                (start.isoformat(), end.isoformat(), start.isoformat(), end.isoformat()),
             ).fetchall()
         finally:
             conn.close()
         result: Dict[str, Dict[str, float]] = {}
-        for r in rows:
+        for r in [*rows, *fallback]:
             result.setdefault(r["date"], {})[r["tag"]] = r["seconds"]
         return result
 
@@ -473,57 +649,113 @@ class TimeRecorder:
         finally:
             conn.close()
 
-    def add_codex_time(self, project: str, project_name: str, seconds: float, tag: str = "Work"):
+    def add_codex_time(
+        self,
+        project: str,
+        project_name: str,
+        seconds: float,
+        tag: str = "Work",
+        record_tag_total: bool = True,
+    ):
         """Accumulate Codex project time for today."""
-        today = date.today().isoformat()
+        if seconds <= 0:
+            return
         now = datetime.now()
-        now_iso = now.isoformat(timespec="seconds")
         start = now - timedelta(seconds=seconds)
-        start_iso = start.isoformat(timespec="seconds")
         conn = self._conn()
         try:
-            conn.execute(
-                """
-                INSERT INTO codex_time_records (date, project, project_name, seconds, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(date, project)
-                DO UPDATE SET
-                    seconds      = seconds + excluded.seconds,
-                    project_name = excluded.project_name,
-                    updated_at   = excluded.updated_at
-                """,
-                (today, project, project_name, seconds, now_iso),
-            )
-            # Insert the same sample into the canonical segment table.
-            conn.execute(
-                """
-                INSERT INTO time_segments
-                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (today, start_iso, now_iso, "codex.exe", project_name, project, tag, seconds),
-            )
+            for chunk_start, chunk_end in self._split_interval(start, now):
+                chunk_seconds = (chunk_end - chunk_start).total_seconds()
+                chunk_date = chunk_start.date().isoformat()
+                end_iso = chunk_end.isoformat(timespec="seconds")
+                conn.execute(
+                    """
+                    INSERT INTO codex_time_records (date, project, project_name, seconds, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(date, project)
+                    DO UPDATE SET
+                        seconds      = seconds + excluded.seconds,
+                        project_name = excluded.project_name,
+                        updated_at   = excluded.updated_at
+                    """,
+                    (chunk_date, project, project_name, chunk_seconds, end_iso),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO time_segments
+                        (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk_date,
+                        chunk_start.isoformat(timespec="seconds"),
+                        end_iso,
+                        "codex.exe",
+                        project_name,
+                        project,
+                        tag,
+                        chunk_seconds,
+                    ),
+                )
+            if record_tag_total:
+                self._upsert_tag_total_conn(conn, tag, start, now)
             conn.commit()
         finally:
             conn.close()
 
     def add_idle_time(self, seconds: float):
         """Record idle time as a segment with tag 'Idle'."""
-        today = date.today().isoformat()
+        if seconds <= 0:
+            return
         now = datetime.now()
-        now_iso = now.isoformat(timespec="seconds")
         start = now - timedelta(seconds=seconds)
-        start_iso = start.isoformat(timespec="seconds")
         conn = self._conn()
         try:
-            conn.execute(
-                """
-                INSERT INTO time_segments
-                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (today, start_iso, now_iso, "idle", "Idle", "", "Idle", seconds),
-            )
+            for chunk_start, chunk_end in self._split_interval(start, now):
+                conn.execute(
+                    """
+                    INSERT INTO time_segments
+                        (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk_start.date().isoformat(),
+                        chunk_start.isoformat(timespec="seconds"),
+                        chunk_end.isoformat(timespec="seconds"),
+                        "idle",
+                        "Idle",
+                        "",
+                        "Idle",
+                        (chunk_end - chunk_start).total_seconds(),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_focus_time(self, tag: str, seconds: float):
+        """Accumulate keyboard-focus time for the two dashboard focus tags."""
+        if seconds <= 0 or tag not in {"Indie", "Work"}:
+            return
+        now = datetime.now()
+        start = now - timedelta(seconds=seconds)
+        conn = self._conn()
+        try:
+            for chunk_start, chunk_end in self._split_interval(start, now):
+                chunk_seconds = (chunk_end - chunk_start).total_seconds()
+                chunk_date = chunk_start.date().isoformat()
+                updated_at = chunk_end.isoformat(timespec="seconds")
+                conn.execute(
+                    """
+                    INSERT INTO focus_time_records (date, tag, seconds, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(date, tag)
+                    DO UPDATE SET
+                        seconds = seconds + excluded.seconds,
+                        updated_at = excluded.updated_at
+                    """,
+                    (chunk_date, tag, chunk_seconds, updated_at),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -626,20 +858,28 @@ class TimeRecorder:
             conn.close()
         return True
 
-    def get_today_timeline(self) -> List[Dict]:
-        """Return [{hour, tag, seconds}] for today, splitting segments across hour boundaries."""
-        today = date.today().isoformat()
+    def get_today_timeline(self, target_date: str = None) -> List[Dict]:
+        """Return active [{hour, tag, seconds}] using wall-clock time per hour.
+
+        Idle is reported separately by ``get_today_idle_time`` and is therefore
+        intentionally omitted here. Overlapping windows in the same tag are
+        merged, so a Timeline bar never exceeds one hour merely because multiple
+        Indie or Work apps are visible.
+        """
+        today = target_date or date.today().isoformat()
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT start_time, end_time, tag, seconds FROM time_segments WHERE date = ?",
+                "SELECT start_time, end_time, tag, seconds FROM time_segments WHERE date = ? AND tag != 'Idle'",
                 (today,),
             ).fetchall()
         finally:
             conn.close()
 
-        # Split each segment into per-hour buckets
-        hour_tag = {}  # {(hour, tag): seconds}
+        # Split each segment into per-hour buckets, then merge overlap within
+        # each (hour, tag) bucket. Other dashboard views intentionally retain
+        # their multi-window cumulative totals.
+        hour_tag_intervals = {}  # {(hour, tag): [(start, end), ...]}
         for r in rows:
             start = datetime.fromisoformat(r["start_time"])
             end = datetime.fromisoformat(r["end_time"])
@@ -649,34 +889,44 @@ class TimeRecorder:
                 # Next hour boundary
                 next_boundary = cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
                 chunk_end = min(next_boundary, end)
-                chunk_seconds = (chunk_end - cursor).total_seconds()
                 hour = cursor.hour
                 key = (hour, tag)
-                hour_tag[key] = hour_tag.get(key, 0) + chunk_seconds
+                hour_tag_intervals.setdefault(key, []).append((cursor, chunk_end))
                 cursor = chunk_end
 
-        result = [
-            {"hour": h, "tag": t, "seconds": round(s, 1)}
-            for (h, t), s in sorted(hour_tag.items())
-        ]
+        result = []
+        for (hour, tag), intervals in sorted(hour_tag_intervals.items()):
+            merged = []
+            for start, end in sorted(intervals):
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            seconds = sum((end - start).total_seconds() for start, end in merged)
+            result.append({"hour": hour, "tag": tag, "seconds": round(seconds, 1)})
         return result
 
-    def get_today_tag_distribution(self) -> List[Dict]:
-        """Return [{tag, seconds}] for today grouped by tag — from time_segments for accuracy."""
-        today = date.today().isoformat()
+    def get_today_tag_distribution(self, target_date: str = None) -> List[Dict]:
+        """Return active tag totals with overlap removed within each tag."""
+        today = target_date or date.today().isoformat()
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT tag, SUM(seconds) AS seconds FROM time_segments WHERE date = ? AND tag != 'Idle' GROUP BY tag ORDER BY seconds DESC",
+                "SELECT tag, seconds FROM tag_time_records WHERE date = ? ORDER BY seconds DESC",
                 (today,),
             ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    "SELECT tag, SUM(seconds) AS seconds FROM time_segments WHERE date = ? AND tag != 'Idle' GROUP BY tag ORDER BY seconds DESC",
+                    (today,),
+                ).fetchall()
         finally:
             conn.close()
         return [dict(r) for r in rows]
 
-    def get_today_app_breakdown(self) -> List[Dict]:
-        """Return app rows with a stable project identity for quick tag edits."""
-        today = date.today().isoformat()
+    def get_today_app_breakdown(self, target_date: str = None) -> List[Dict]:
+        """Return app rows with a stable project identity for a date."""
+        today = target_date or date.today().isoformat()
         conn = self._conn()
         try:
             rows = conn.execute(
@@ -698,9 +948,9 @@ class TimeRecorder:
     #  Efficiency analysis                                               #
     # ------------------------------------------------------------------ #
 
-    def get_today_idle_time(self) -> float:
-        """Return total idle seconds today from time_segments."""
-        today = date.today().isoformat()
+    def get_today_idle_time(self, target_date: str = None) -> float:
+        """Return total idle seconds for a date from time_segments."""
+        today = target_date or date.today().isoformat()
         conn = self._conn()
         try:
             row = conn.execute(

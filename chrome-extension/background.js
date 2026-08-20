@@ -1,20 +1,20 @@
 const TRACKER_URL = "http://127.0.0.1:17891/api/chrome-url";
 
-function reportUrl(url) {
+function reportUrl(url, title = "") {
   if (!url || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("edge://")) {
     return;
   }
   fetch(TRACKER_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: url }),
+    body: JSON.stringify({ url: url, title: title }),
   }).catch(() => {});
 }
 
 function reportActiveTab() {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs && tabs.length > 0 && tabs[0].url) {
-      reportUrl(tabs[0].url);
+      reportUrl(tabs[0].url, tabs[0].title);
     }
   });
 }
@@ -22,7 +22,7 @@ function reportActiveTab() {
 chrome.tabs.onActivated.addListener(reportActiveTab);
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url && tab.active) {
-    reportUrl(changeInfo.url);
+    reportUrl(changeInfo.url, tab.title);
   }
 });
 chrome.windows.onFocusChanged.addListener((windowId) => {

@@ -5,13 +5,14 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import config
 import tracker.time_recorder as time_recorder_module
 from config import AppConfig
 from tracker.time_recorder import TimeRecorder
+from tracker.codex_activity_manager import CodexActivityManager
 from tracker.tracking_engine import TrackingEngine
 from tracker.window_tracker import ForegroundInfo
 from tracker.project_parser import parse_project
@@ -103,6 +104,144 @@ class TestTimerScheme(unittest.TestCase):
         codex = next(r for r in rows if r["DisplayName"] == "Assets (Indie)")
         self.assertEqual(codex["Project"], project)
         self.assertEqual(codex["Tag"], "Indie")
+
+    def test_codex_requires_http_hook_before_recording(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        manager = CodexActivityManager(self.recorder, indie_keywords=["P1-c"])
+        engine = TrackingEngine(AppConfig(), self.recorder, manager)
+        codex_window = ForegroundInfo(
+            process_name="ChatGPT.exe",
+            window_title="Codex",
+            pid=1,
+        )
+
+        # A visible Codex window alone must not create a generic Codex record.
+        engine._record_window(codex_window, 10)
+        self.assertEqual(self.recorder.get_today_total(), 0)
+        self.assertEqual(self.recorder.get_codex_today_total(), 0)
+
+        # A valid local HTTP event activates the project and unlocks recording.
+        manager.handle_event(
+            "SessionStart", "session-1", project, datetime.now(timezone.utc)
+        )
+        engine._record_window(codex_window, 10)
+
+        summary = self.recorder.get_codex_today_summary()
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["project"], project)
+        self.assertAlmostEqual(summary[0]["seconds"], 10)
+
+    def test_multiple_codex_sessions_share_one_sample_interval(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        manager = CodexActivityManager(self.recorder, indie_keywords=["P1-c"])
+        manager.handle_event(
+            "SessionStart", "session-1", project, datetime.now(timezone.utc)
+        )
+        engine = TrackingEngine(AppConfig(), self.recorder, manager)
+        windows = [
+            ForegroundInfo("ChatGPT.exe", "Codex session 1", pid=1, hwnd=101),
+            ForegroundInfo("ChatGPT.exe", "Codex session 2", pid=2, hwnd=202),
+        ]
+
+        engine._record_selected_windows(windows, elapsed=10, focused_hwnd=101)
+
+        summary = self.recorder.get_codex_today_summary()
+        self.assertEqual(len(summary), 1)
+        self.assertAlmostEqual(summary[0]["seconds"], 10)
+
+    def test_visible_codex_window_is_recorded_without_keyboard_focus(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        manager = CodexActivityManager(self.recorder, indie_keywords=["P1-c"])
+        manager.handle_event(
+            "SessionStart", "session-1", project, datetime.now(timezone.utc)
+        )
+        engine = TrackingEngine(AppConfig(), self.recorder, manager)
+        codex_window = ForegroundInfo(
+            "ChatGPT.exe", "Codex background", pid=1, hwnd=202
+        )
+
+        engine._record_selected_windows([codex_window], elapsed=10, focused_hwnd=101)
+
+        self.assertAlmostEqual(self.recorder.get_codex_today_total(), 10)
+
+    def test_focus_time_only_uses_the_keyboard_focused_window(self):
+        project = r"D:\Data\unity\P1-c\Assets"
+        manager = CodexActivityManager(self.recorder, indie_keywords=["P1-c"])
+        manager.handle_event(
+            "SessionStart", "session-1", project, datetime.now(timezone.utc)
+        )
+        engine = TrackingEngine(AppConfig(), self.recorder, manager)
+        codex_window = ForegroundInfo("ChatGPT.exe", "Codex", pid=1, hwnd=101)
+
+        engine._record_selected_windows([codex_window], elapsed=10, focused_hwnd=999)
+        engine._record_selected_windows([codex_window], elapsed=10, focused_hwnd=101)
+
+        totals = self.recorder.get_today_live_totals()
+        self.assertAlmostEqual(totals["indie_focus"], 10)
+        self.assertAlmostEqual(totals["work_focus"], 0)
+
+    def test_live_totals_exclude_idle_time(self):
+        self.recorder.add_time("Devin.exe", "Devin", 12, tag="Indie")
+        self.recorder.add_time("IDE.exe", "IDE", 8, tag="Work")
+        self.recorder.add_focus_time("Indie", 7)
+        self.recorder.add_focus_time("Work", 3)
+        self.recorder.add_focus_time("Other", 99)
+        self.recorder.add_idle_time(5)
+
+        totals = self.recorder.get_today_live_totals()
+
+        self.assertAlmostEqual(totals["total"], 20)
+        self.assertAlmostEqual(totals["indie"], 12)
+        self.assertAlmostEqual(totals["work"], 8)
+        self.assertAlmostEqual(totals["indie_focus"], 7)
+        self.assertAlmostEqual(totals["work_focus"], 3)
+
+    def test_same_tag_windows_count_once_in_tag_totals_but_keep_app_rows(self):
+        app_config = AppConfig()
+        app_config.set_process_tag("Devin.exe", "Indie")
+        app_config.set_process_tag("Unity.exe", "Indie")
+        engine = TrackingEngine(app_config, self.recorder)
+        windows = [
+            ForegroundInfo("Devin.exe", "Devin - Assets", pid=1, hwnd=101),
+            ForegroundInfo("Unity.exe", "Unity Editor", pid=2, hwnd=202),
+        ]
+
+        engine._record_selected_windows(windows, elapsed=10, focused_hwnd=101)
+
+        totals = self.recorder.get_today_live_totals()
+        self.assertAlmostEqual(totals["indie"], 10)
+        self.assertAlmostEqual(totals["total"], 10)
+        apps = self.recorder.get_today_app_breakdown()
+        self.assertEqual(len(apps), 2)
+        self.assertAlmostEqual(sum(row["seconds"] for row in apps), 20)
+
+    def test_timeline_merges_overlapping_windows_with_the_same_tag(self):
+        today = date.today().isoformat()
+        conn = self.recorder._conn()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO time_segments
+                    (date, start_time, end_time, process_name, display_name, project, tag, seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (today, f"{today}T15:00:00", f"{today}T15:30:00", "Devin.exe", "Devin", "", "Indie", 1800),
+                    (today, f"{today}T15:20:00", f"{today}T15:50:00", "codex.exe", "Codex", "", "Indie", 1800),
+                    (today, f"{today}T15:50:00", f"{today}T16:00:00", "idle", "Idle", "", "Idle", 600),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        timeline = self.recorder.get_today_timeline()
+        indie_at_15 = next(
+            row for row in timeline if row["hour"] == 15 and row["tag"] == "Indie"
+        )
+
+        self.assertAlmostEqual(indie_at_15["seconds"], 3000)
+        self.assertNotIn("Idle", {row["tag"] for row in timeline})
 
     def test_existing_segment_table_migrates_project_column(self):
         conn = sqlite3.connect(self._db_path)
