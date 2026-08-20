@@ -9,6 +9,7 @@ import threading
 
 from config import AppConfig
 from tracker.chrome_url_cache import ChromeUrlCache
+from tracker.cloud_sync import CloudSync
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.codex_event_server import CodexEventServer
 from tracker.single_instance import SingleInstanceGuard
@@ -64,7 +65,20 @@ def main():
     config = AppConfig()
     config._set_registry_autostart(config.auto_start_with_windows)
 
-    recorder = TimeRecorder()
+    recorder = TimeRecorder(device_id=config.device_id)
+
+    # Cloud sync: runs once per day on first startup (if enabled in config).
+    # Pushes this device's historical daily aggregates to Supabase and pulls
+    # all devices' data back. Runs in a background thread so startup is not
+    # blocked by network latency.
+    cloud_sync = CloudSync(config, recorder)
+    if cloud_sync.enabled:
+        sync_thread = threading.Thread(
+            target=cloud_sync.run_if_needed, name="cloud-sync", daemon=True
+        )
+        sync_thread.start()
+    else:
+        logger.info("Cloud sync disabled. Set supabase.enabled=true in config.json to enable.")
 
     codex_proc_names = ("ChatGPT.exe", "codex.exe", "codex-code-mode-host.exe")
     config_indie_kws = []

@@ -160,6 +160,60 @@ python -m venv .venv
 - pystray + Pillow 系统托盘
 - psutil + pywin32 窗口检测
 - SQLite 本地持久化
+- Supabase (PostgreSQL) 云同步（可选）
+
+## 云同步（Supabase）
+
+支持多台电脑之间的历史数据同步。每天首次运行时自动将本设备的历史日级汇总上传到 Supabase，并拉取所有设备的数据合并到本地。
+
+### 同步范围
+
+- `tag_time_records`：按日期+标签汇总（如 2026-08-19 / Work / 14400s）
+- `time_records`：按日期+应用+项目汇总
+- **不同步** `time_segments`（秒级事实表，数据量太大）
+
+### 同步策略
+
+- **时机**：每天首次运行时触发，只同步 `date < today` 的历史数据
+- **方向**：双向（push 本设备数据，pull 所有设备数据）
+- **冲突**：云端优先（同一 device_id + date 的行，后上传的覆盖先上传的）
+- **多设备合并**：本地查询时 SUM 所有 device_id 的数据，自动合并
+- **防翻倍**：本地表加了 `device_id` 列，push 只上传本设备行，pull 按 device_id 分别 UPSERT
+
+### 配置方法
+
+1. **创建 Supabase 项目**（免费档 500MB 足够）
+
+2. **初始化云端表结构**：在 Supabase Dashboard → SQL Editor 中执行 `schema_supabase.sql`
+
+3. **获取 API key**：Dashboard → Settings → API Keys，复制 publishable key（`sb_publishable_...`）
+
+4. **编辑配置文件** `~/.worktime-tracker/config.json`，添加：
+
+```json
+{
+  "supabase": {
+    "url": "https://your-project-ref.supabase.co",
+    "anon_key": "sb_publishable_xxxxxxxxxxxxx",
+    "enabled": true
+  }
+}
+```
+
+5. **重启程序**，首次启动时会自动同步
+
+### 安全说明
+
+- 使用 publishable key（公开密钥），安全由 RLS 策略保证
+- RLS 允许 anon 角色读写所有行（适合个人使用，不分发程序的场景）
+- 如果需要分发程序给他人，应改用 Supabase Auth 登录 + 按 `auth.uid()` 隔离的 RLS 策略
+- `device_id` 在首次运行时自动生成（UUID），持久化在 config.json 中
+
+### 数据存储估算
+
+- 每天每设备约 30-50 行，每行约 100 字节
+- 2 台设备 × 365 天 ≈ 3.6 MB/年
+- 500MB 免费额度足够使用 100+ 年
 
 ## 测试
 

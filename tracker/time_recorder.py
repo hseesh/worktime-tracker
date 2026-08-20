@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS time_records (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   TEXT    NOT NULL DEFAULT '',
     date        TEXT    NOT NULL,
     process_name TEXT   NOT NULL,
     display_name TEXT   NOT NULL,
@@ -20,7 +21,7 @@ CREATE TABLE IF NOT EXISTS time_records (
     tag         TEXT    NOT NULL DEFAULT 'Other',
     seconds     REAL    NOT NULL DEFAULT 0,
     updated_at  TEXT    NOT NULL,
-    UNIQUE(date, process_name, project)
+    UNIQUE(device_id, date, process_name, project)
 );
 """
 
@@ -60,27 +61,29 @@ CREATE TABLE IF NOT EXISTS focus_time_records (
 
 _CREATE_TAG_TOTALS_SQL = """
 CREATE TABLE IF NOT EXISTS tag_time_records (
+    device_id   TEXT    NOT NULL DEFAULT '',
     date        TEXT    NOT NULL,
     tag         TEXT    NOT NULL,
     seconds     REAL    NOT NULL DEFAULT 0,
     updated_at  TEXT    NOT NULL,
-    PRIMARY KEY (date, tag)
+    PRIMARY KEY (device_id, date, tag)
 );
 """
 
 _MIGRATE_ADD_PROJECT_SQL = """
 CREATE TABLE IF NOT EXISTS time_records_new (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   TEXT    NOT NULL DEFAULT '',
     date        TEXT    NOT NULL,
     process_name TEXT   NOT NULL,
     display_name TEXT   NOT NULL,
     project     TEXT    NOT NULL DEFAULT '',
     seconds     REAL    NOT NULL DEFAULT 0,
     updated_at  TEXT    NOT NULL,
-    UNIQUE(date, process_name, project)
+    UNIQUE(device_id, date, process_name, project)
 );
-INSERT INTO time_records_new (date, process_name, display_name, project, seconds, updated_at)
-SELECT date, process_name, display_name, '', seconds, updated_at FROM time_records;
+INSERT INTO time_records_new (device_id, date, process_name, display_name, project, seconds, updated_at)
+SELECT '', date, process_name, display_name, '', seconds, updated_at FROM time_records;
 DROP TABLE time_records;
 ALTER TABLE time_records_new RENAME TO time_records;
 """
@@ -122,8 +125,9 @@ class TimeRecorder:
     tracker thread and the UI thread do not share a single connection object.
     """
 
-    def __init__(self):
+    def __init__(self, device_id: str = ""):
         DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self._device_id = device_id
         self._init_db()
 
     def _init_db(self):
@@ -143,6 +147,7 @@ class TimeRecorder:
             self._migrate_add_project(conn)
             self._migrate_add_tag(conn)
             self._migrate_add_segment_project(conn)
+            self._migrate_add_device_id(conn)
             # History range app breakdowns read these fields together. Keep a
             # covering index so the aggregation does not fetch every segment
             # row from the table for each History request.
@@ -157,12 +162,12 @@ class TimeRecorder:
         finally:
             conn.close()
 
-    @staticmethod
-    def _migrate_current_tag_totals(conn):
+    def _migrate_current_tag_totals(self, conn):
         """Backfill today's de-duplicated tag totals from legacy segments once."""
         today = date.today().isoformat()
         existing = conn.execute(
-            "SELECT 1 FROM tag_time_records WHERE date = ? LIMIT 1", (today,)
+            "SELECT 1 FROM tag_time_records WHERE device_id = ? AND date = ? LIMIT 1",
+            (self._device_id, today),
         ).fetchone()
         if existing:
             return
@@ -190,8 +195,8 @@ class TimeRecorder:
                     merged.append((start, end))
             seconds = sum((end - start).total_seconds() for start, end in merged)
             conn.execute(
-                "INSERT OR REPLACE INTO tag_time_records (date, tag, seconds, updated_at) VALUES (?, ?, ?, ?)",
-                (today, tag, seconds, now),
+                "INSERT OR REPLACE INTO tag_time_records (device_id, date, tag, seconds, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (self._device_id, today, tag, seconds, now),
             )
 
     @staticmethod
@@ -217,6 +222,71 @@ class TimeRecorder:
         col_names = [c["name"] for c in cols]
         if "project" not in col_names:
             conn.execute("ALTER TABLE time_segments ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+
+    def _migrate_add_device_id(self, conn):
+        """Add device_id column to time_records and tag_time_records.
+
+        Recreates both tables with device_id in the unique/primary key.
+        Existing rows are backfilled with this device's device_id so that
+        local recording continues to accumulate on the same rows.
+        """
+        # --- time_records ---
+        cols = conn.execute("PRAGMA table_info(time_records)").fetchall()
+        col_names = [c["name"] for c in cols]
+        if "device_id" not in col_names:
+            conn.execute(
+                """
+                CREATE TABLE time_records_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id   TEXT    NOT NULL DEFAULT '',
+                    date        TEXT    NOT NULL,
+                    process_name TEXT   NOT NULL,
+                    display_name TEXT   NOT NULL,
+                    project     TEXT    NOT NULL DEFAULT '',
+                    tag         TEXT    NOT NULL DEFAULT 'Other',
+                    seconds     REAL    NOT NULL DEFAULT 0,
+                    updated_at  TEXT    NOT NULL,
+                    UNIQUE(device_id, date, process_name, project)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO time_records_new
+                    (device_id, date, process_name, display_name, project, tag, seconds, updated_at)
+                SELECT ?, date, process_name, display_name, project, tag, seconds, updated_at
+                FROM time_records
+                """,
+                (self._device_id,),
+            )
+            conn.execute("DROP TABLE time_records")
+            conn.execute("ALTER TABLE time_records_new RENAME TO time_records")
+
+        # --- tag_time_records ---
+        cols = conn.execute("PRAGMA table_info(tag_time_records)").fetchall()
+        col_names = [c["name"] for c in cols]
+        if "device_id" not in col_names:
+            conn.execute(
+                """
+                CREATE TABLE tag_time_records_new (
+                    device_id   TEXT    NOT NULL DEFAULT '',
+                    date        TEXT    NOT NULL,
+                    tag         TEXT    NOT NULL,
+                    seconds     REAL    NOT NULL DEFAULT 0,
+                    updated_at  TEXT    NOT NULL,
+                    PRIMARY KEY (device_id, date, tag)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO tag_time_records_new (device_id, date, tag, seconds, updated_at)
+                SELECT ?, date, tag, seconds, updated_at FROM tag_time_records
+                """,
+                (self._device_id,),
+            )
+            conn.execute("DROP TABLE tag_time_records")
+            conn.execute("ALTER TABLE tag_time_records_new RENAME TO tag_time_records")
 
     @staticmethod
     def _seed_default_tags(conn):
@@ -364,21 +434,21 @@ class TimeRecorder:
             yield cursor, chunk_end
             cursor = chunk_end
 
-    @staticmethod
-    def _upsert_tag_total_conn(conn, tag: str, start: datetime, end: datetime):
+    def _upsert_tag_total_conn(self, conn, tag: str, start: datetime, end: datetime):
         if not tag or tag == "Idle" or end <= start:
             return
         updated_at = end.isoformat(timespec="seconds")
         for chunk_start, chunk_end in TimeRecorder._split_interval(start, end):
             conn.execute(
                 """
-                INSERT INTO tag_time_records (date, tag, seconds, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(date, tag) DO UPDATE SET
+                INSERT INTO tag_time_records (device_id, date, tag, seconds, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, date, tag) DO UPDATE SET
                     seconds = seconds + excluded.seconds,
                     updated_at = excluded.updated_at
                 """,
                 (
+                    self._device_id,
                     chunk_start.date().isoformat(),
                     tag,
                     (chunk_end - chunk_start).total_seconds(),
@@ -420,16 +490,16 @@ class TimeRecorder:
                 end_iso = chunk_end.isoformat(timespec="seconds")
                 conn.execute(
                     """
-                    INSERT INTO time_records (date, process_name, display_name, project, tag, seconds, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(date, process_name, project)
+                    INSERT INTO time_records (device_id, date, process_name, display_name, project, tag, seconds, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id, date, process_name, project)
                     DO UPDATE SET
                         seconds    = seconds + excluded.seconds,
                         display_name = excluded.display_name,
                         tag         = excluded.tag,
                         updated_at = excluded.updated_at
                     """,
-                    (chunk_date, process_name, display_name, project, tag, chunk_seconds, end_iso),
+                    (self._device_id, chunk_date, process_name, display_name, project, tag, chunk_seconds, end_iso),
                 )
                 conn.execute(
                     """
@@ -588,11 +658,16 @@ class TimeRecorder:
         return [(r["date"], r["total"]) for r in rows]
 
     def get_daily_tag_breakdown(self, start: date, end: date) -> Dict[str, Dict[str, float]]:
-        """Return de-duplicated {date_iso: {tag: seconds}} for [start, end]."""
+        """Return de-duplicated {date_iso: {tag: seconds}} for [start, end].
+
+        Aggregates across all device_ids (SUM) so multi-device sync data
+        is merged into per-day totals.
+        """
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT date, tag, seconds FROM tag_time_records WHERE date >= ? AND date <= ? ORDER BY date",
+                "SELECT date, tag, SUM(seconds) AS seconds FROM tag_time_records "
+                "WHERE date >= ? AND date <= ? GROUP BY date, tag ORDER BY date",
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
             fallback = conn.execute(
@@ -611,6 +686,87 @@ class TimeRecorder:
         for r in [*rows, *fallback]:
             result.setdefault(r["date"], {})[r["tag"]] = r["seconds"]
         return result
+
+    # ------------------------------------------------------------------ #
+    #  Cloud sync helpers                                                 #
+    # ------------------------------------------------------------------ #
+
+    def get_local_time_records_for_sync(self, before_date: str) -> List[Dict]:
+        """Return this device's time_records rows for dates < before_date (ISO)."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT device_id, date, process_name, display_name, project, tag, seconds, updated_at "
+                "FROM time_records WHERE device_id = ? AND date < ?",
+                (self._device_id, before_date),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def get_local_tag_time_records_for_sync(self, before_date: str) -> List[Dict]:
+        """Return this device's tag_time_records rows for dates < before_date (ISO)."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT device_id, date, tag, seconds, updated_at "
+                "FROM tag_time_records WHERE device_id = ? AND date < ?",
+                (self._device_id, before_date),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def upsert_cloud_time_record(self, row: Dict):
+        """Insert or replace a time_records row from cloud sync.
+
+        Conflict policy: cloud-priority (REPLACE). The caller should only
+        pass rows with date < today so today's local recording is untouched.
+        """
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO time_records
+                    (device_id, date, process_name, display_name, project, tag, seconds, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["device_id"],
+                    row["date"],
+                    row["process_name"],
+                    row["display_name"],
+                    row.get("project", ""),
+                    row.get("tag", "Other"),
+                    row["seconds"],
+                    row.get("updated_at", ""),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert_cloud_tag_time_record(self, row: Dict):
+        """Insert or replace a tag_time_records row from cloud sync."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO tag_time_records
+                    (device_id, date, tag, seconds, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    row["device_id"],
+                    row["date"],
+                    row["tag"],
+                    row["seconds"],
+                    row.get("updated_at", ""),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------ #
     #  Codex event + time persistence                                    #
@@ -912,7 +1068,7 @@ class TimeRecorder:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT tag, seconds FROM tag_time_records WHERE date = ? ORDER BY seconds DESC",
+                "SELECT tag, SUM(seconds) AS seconds FROM tag_time_records WHERE date = ? GROUP BY tag ORDER BY seconds DESC",
                 (today,),
             ).fetchall()
             if not rows:

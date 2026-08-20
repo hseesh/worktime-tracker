@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import uuid
 import winreg
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -77,6 +78,15 @@ CONFIG_DIR = Path.home() / ".worktime-tracker"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DB_FILE = CONFIG_DIR / "worktime.db"
 
+# Default Supabase REST API settings. The publishable (anon) key is safe to
+# embed in a desktop app — data access is guarded by RLS policies.
+# User fills in `anon_key` via config.json or Settings UI.
+DEFAULT_SUPABASE_CONFIG: Dict = {
+    "url": "https://hqlqqthkiulmozgxbnxx.supabase.co",
+    "anon_key": "",  # Must be set by user (sb_publishable_...)
+    "enabled": False,  # Opt-in; sync only runs when explicitly enabled
+}
+
 
 class AppConfig:
     """Manages persistent configuration with JSON file."""
@@ -93,6 +103,9 @@ class AppConfig:
         self._tag_keyword_rules: Dict[str, List[Dict]] = {}
         self._app_tag_overrides: Dict[str, Dict[str, str]] = {}
         self._url_tag_rules: Dict[str, List[Dict]] = {}
+        self._supabase: Dict = dict(DEFAULT_SUPABASE_CONFIG)
+        self._device_id: str = ""
+        self._last_sync_date: str = ""  # ISO date string of last successful cloud sync
         self.load()
 
     def load(self):
@@ -113,6 +126,13 @@ class AppConfig:
                 self._tag_keyword_rules = data.get("tag_keyword_rules", {})
                 self._app_tag_overrides = data.get("app_tag_overrides", {})
                 self._url_tag_rules = data.get("url_tag_rules", {})
+
+                # Cloud sync config (merge with defaults so new fields appear)
+                saved_supa = data.get("supabase", {})
+                self._supabase = dict(DEFAULT_SUPABASE_CONFIG)
+                self._supabase.update(saved_supa)
+                self._device_id = data.get("device_id", "")
+                self._last_sync_date = data.get("last_sync_date", "")
 
                 # Merge default process tags (so new defaults appear)
                 for proc, tag in DEFAULT_PROCESS_TAGS.items():
@@ -195,6 +215,9 @@ class AppConfig:
             "tag_keyword_rules": self._tag_keyword_rules,
             "app_tag_overrides": self._app_tag_overrides,
             "url_tag_rules": self._url_tag_rules,
+            "supabase": self._supabase,
+            "device_id": self._device_id,
+            "last_sync_date": self._last_sync_date,
         }
         CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -485,3 +508,34 @@ class AppConfig:
 
     def get_indie_keywords(self, process_name: str) -> List[str]:
         return self._indie_keywords.get(process_name, [])
+
+    # ---- Cloud sync (Supabase) ----
+
+    @property
+    def supabase(self) -> Dict:
+        return self._supabase
+
+    @property
+    def supabase_enabled(self) -> bool:
+        return bool(self._supabase.get("enabled") and self._supabase.get("url") and self._supabase.get("anon_key"))
+
+    def set_supabase(self, config: Dict):
+        """Update Supabase config fields and persist."""
+        self._supabase.update(config)
+        self.save()
+
+    @property
+    def device_id(self) -> str:
+        """Stable per-device identifier. Generated on first access and persisted."""
+        if not self._device_id:
+            self._device_id = str(uuid.uuid4())
+            self.save()
+        return self._device_id
+
+    @property
+    def last_sync_date(self) -> str:
+        return self._last_sync_date
+
+    def set_last_sync_date(self, value: str):
+        self._last_sync_date = value
+        self.save()
