@@ -27,6 +27,19 @@ logger = logging.getLogger(__name__)
 REST_BASE = "/rest/v1"
 
 
+def _strip_tz(ts: str) -> str:
+    """Remove timezone suffix from an ISO timestamp (e.g. '2026-08-19T10:00:00+00:00' -> '2026-08-19T10:00:00')."""
+    if not ts:
+        return ""
+    # Strip '+00:00' or 'Z' suffix to match local SQLite format
+    for suffix in ("+00:00", "+0000"):
+        if ts.endswith(suffix):
+            return ts[: -len(suffix)]
+    if ts.endswith("Z"):
+        return ts[:-1]
+    return ts
+
+
 class CloudSync:
     """Handles push/pull of daily aggregates to/from Supabase."""
 
@@ -175,6 +188,7 @@ class CloudSync:
             return
 
         for row in rows:
+            row["updated_at"] = _strip_tz(row.get("updated_at", ""))
             self._recorder.upsert_cloud_tag_time_record(row)
         logger.info("Pulled and merged %d tag_time_records rows.", len(rows))
 
@@ -189,6 +203,7 @@ class CloudSync:
             return
 
         for row in rows:
+            row["updated_at"] = _strip_tz(row.get("updated_at", ""))
             self._recorder.upsert_cloud_time_record(row)
         logger.info("Pulled and merged %d time_records rows.", len(rows))
 

@@ -792,7 +792,7 @@ class WebServer:
             # keyword and process rules, so the next poll cannot revert it.
             self._config.set_app_tag_override(proc, project, display_name, tag)
             try:
-                TimeRecorder.update_app_tag(proc, display_name, project, tag)
+                self._recorder.update_app_tag(proc, display_name, project, tag)
             except Exception as e:
                 logger.warning("Failed to update app tag history: %s", e)
                 return jsonify({"error": str(e)}), 500
@@ -863,8 +863,8 @@ class WebServer:
                 rows = conn.execute(
                     """
                     SELECT date, display_name, process_name, project, tag,
-                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
-                    FROM time_segments
+                           SUM(seconds) AS seconds, MAX(updated_at) AS updated_at
+                    FROM time_records
                     WHERE date >= ? AND date <= ? AND tag != 'Idle'
                     GROUP BY date, display_name, process_name, project, tag
                     ORDER BY date, seconds DESC
@@ -875,8 +875,8 @@ class WebServer:
                 rows = conn.execute(
                     """
                     SELECT date, display_name, process_name, project, tag,
-                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
-                    FROM time_segments
+                           SUM(seconds) AS seconds, MAX(updated_at) AS updated_at
+                    FROM time_records
                     WHERE tag != 'Idle'
                     GROUP BY date, display_name, process_name, project, tag
                     ORDER BY date, seconds DESC

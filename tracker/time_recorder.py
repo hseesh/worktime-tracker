@@ -345,37 +345,41 @@ class TimeRecorder:
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
-    @classmethod
-    def update_tags_from_process_tags(cls, process_tags: dict):
-        """Update time_records.tag for processes whose tag has changed in config."""
-        conn = cls._conn()
+    def update_tags_from_process_tags(self, process_tags: dict):
+        """Update time_records.tag for processes whose tag has changed in config.
+
+        Only affects this device's rows; other devices' data is managed by
+        cloud sync.
+        """
+        conn = self._conn()
         try:
             for proc, tag in process_tags.items():
                 conn.execute(
-                    "UPDATE time_records SET tag = ? WHERE process_name = ? AND tag != ?",
-                    (tag, proc, tag),
+                    "UPDATE time_records SET tag = ? WHERE device_id = ? AND process_name = ? AND tag != ?",
+                    (tag, self._device_id, proc, tag),
                 )
             conn.commit()
         finally:
             conn.close()
 
-    @classmethod
-    def update_process_tag_selective(cls, process_name: str, old_tag: str, new_tag: str):
+    def update_process_tag_selective(self, process_name: str, old_tag: str, new_tag: str):
         """Update time_records.tag only for records with the old tag, preserving
-        records that were tagged differently via keyword rules."""
-        conn = cls._conn()
+        records that were tagged differently via keyword rules.
+
+        Only affects this device's rows.
+        """
+        conn = self._conn()
         try:
             conn.execute(
-                "UPDATE time_records SET tag = ? WHERE process_name = ? AND tag = ?",
-                (new_tag, process_name, old_tag),
+                "UPDATE time_records SET tag = ? WHERE device_id = ? AND process_name = ? AND tag = ?",
+                (new_tag, self._device_id, process_name, old_tag),
             )
             conn.commit()
         finally:
             conn.close()
 
-    @classmethod
     def update_app_tag(
-        cls,
+        self,
         process_name: str,
         display_name: str,
         project: str,
@@ -385,8 +389,12 @@ class TimeRecorder:
 
         Project is preferred when available. The display-name fallback also
         catches segments recorded before the project column was introduced.
+
+        Only updates this device's rows in time_records (other devices' data
+        is managed by cloud sync). time_segments is always local-only so it
+        is updated unconditionally.
         """
-        conn = cls._conn()
+        conn = self._conn()
         try:
             if project:
                 segment_where = (
@@ -395,15 +403,15 @@ class TimeRecorder:
                 )
                 segment_args = (process_name, project, display_name)
                 record_where = (
-                    "process_name = ? COLLATE NOCASE "
+                    "device_id = ? AND process_name = ? COLLATE NOCASE "
                     "AND (project = ? COLLATE NOCASE OR display_name = ?)"
                 )
-                record_args = segment_args
+                record_args = (self._device_id, process_name, project, display_name)
             else:
                 segment_where = "process_name = ? COLLATE NOCASE AND display_name = ?"
                 segment_args = (process_name, display_name)
-                record_where = segment_where
-                record_args = segment_args
+                record_where = "device_id = ? AND process_name = ? COLLATE NOCASE AND display_name = ?"
+                record_args = (self._device_id, process_name, display_name)
 
             conn.execute(
                 f"UPDATE time_segments SET tag = ? WHERE {segment_where}",
@@ -609,7 +617,13 @@ class TimeRecorder:
         return result
 
     def get_range_app_breakdown(self, start: date, end: date) -> List[Dict]:
-        """Return per-app/project/tag totals from canonical segments."""
+        """Return per-app/project/tag totals.
+
+        Aggregates from time_records (which includes synced data from all
+        devices) instead of time_segments (local-only per-second data).
+        Falls back to time_segments for dates that have no time_records
+        rows (e.g. today, which hasn't been synced yet).
+        """
         conn = self._conn()
         try:
             rows = conn.execute(
@@ -617,16 +631,31 @@ class TimeRecorder:
                 SELECT display_name, process_name, project, tag,
                        SUM(seconds) AS seconds,
                        COUNT(DISTINCT date) AS days_active
-                FROM time_segments
+                FROM time_records
                 WHERE date >= ? AND date <= ? AND tag != 'Idle'
                 GROUP BY display_name, process_name, project, tag
                 ORDER BY seconds DESC
                 """,
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
+            # Fallback: for dates with no time_records rows (e.g. today),
+            # supplement with time_segments data.
+            fallback = conn.execute(
+                """
+                SELECT display_name, process_name, project, tag,
+                       SUM(seconds) AS seconds,
+                       COUNT(DISTINCT date) AS days_active
+                FROM time_segments
+                WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                  AND date NOT IN (SELECT DISTINCT date FROM time_records WHERE date >= ? AND date <= ?)
+                GROUP BY display_name, process_name, project, tag
+                ORDER BY seconds DESC
+                """,
+                (start.isoformat(), end.isoformat(), start.isoformat(), end.isoformat()),
+            ).fetchall()
         finally:
             conn.close()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in [*rows, *fallback]]
 
     def get_first_record_date(self) -> Optional[str]:
         """Return the first date available in the canonical segment table."""
@@ -838,6 +867,19 @@ class TimeRecorder:
                 )
                 conn.execute(
                     """
+                    INSERT INTO time_records (device_id, date, process_name, display_name, project, tag, seconds, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id, date, process_name, project)
+                    DO UPDATE SET
+                        seconds    = seconds + excluded.seconds,
+                        display_name = excluded.display_name,
+                        tag         = excluded.tag,
+                        updated_at = excluded.updated_at
+                    """,
+                    (self._device_id, chunk_date, "codex.exe", project_name, project, tag, chunk_seconds, end_iso),
+                )
+                conn.execute(
+                    """
                     INSERT INTO time_segments
                         (date, start_time, end_time, process_name, display_name, project, tag, seconds)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -992,7 +1034,7 @@ class TimeRecorder:
             params.append(tag_id)
             conn.execute(f"UPDATE tags SET {', '.join(sets)} WHERE id = ?", params)
             if name is not None and not is_system and name != tag["name"]:
-                conn.execute("UPDATE time_records SET tag = ? WHERE tag = ?", (name, tag["name"]))
+                conn.execute("UPDATE time_records SET tag = ? WHERE device_id = ? AND tag = ?", (name, self._device_id, tag["name"]))
                 conn.execute("UPDATE time_segments SET tag = ? WHERE tag = ?", (name, tag["name"]))
             conn.commit()
         finally:
@@ -1005,8 +1047,8 @@ class TimeRecorder:
             tag = conn.execute("SELECT name, is_system FROM tags WHERE id = ?", (tag_id,)).fetchone()
             if not tag or tag["is_system"]:
                 return False
-            # Reassign records to Other
-            conn.execute("UPDATE time_records SET tag = 'Other' WHERE tag = ?", (tag["name"],))
+            # Reassign records to Other (only this device's rows in time_records)
+            conn.execute("UPDATE time_records SET tag = 'Other' WHERE device_id = ? AND tag = ?", (self._device_id, tag["name"]))
             conn.execute("UPDATE time_segments SET tag = 'Other' WHERE tag = ?", (tag["name"],))
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
             conn.commit()
@@ -1081,7 +1123,11 @@ class TimeRecorder:
         return [dict(r) for r in rows]
 
     def get_today_app_breakdown(self, target_date: str = None) -> List[Dict]:
-        """Return app rows with a stable project identity for a date."""
+        """Return app rows with a stable project identity for a date.
+
+        Uses time_records (multi-device) with time_segments fallback for
+        today's live data that hasn't been synced yet.
+        """
         today = target_date or date.today().isoformat()
         conn = self._conn()
         try:
@@ -1089,13 +1135,25 @@ class TimeRecorder:
                 """
                 SELECT display_name, process_name, MAX(project) AS project,
                        tag, SUM(seconds) AS seconds
-                FROM time_segments
+                FROM time_records
                 WHERE date = ? AND tag != 'Idle'
                 GROUP BY process_name, display_name, tag
                 ORDER BY seconds DESC
                 """,
                 (today,),
             ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    """
+                    SELECT display_name, process_name, MAX(project) AS project,
+                           tag, SUM(seconds) AS seconds
+                    FROM time_segments
+                    WHERE date = ? AND tag != 'Idle'
+                    GROUP BY process_name, display_name, tag
+                    ORDER BY seconds DESC
+                    """,
+                    (today,),
+                ).fetchall()
         finally:
             conn.close()
         return [dict(r) for r in rows]
@@ -1244,8 +1302,8 @@ class TimeRecorder:
                 rows = conn.execute(
                     """
                     SELECT date, display_name, process_name, project, tag,
-                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
-                    FROM time_segments
+                           SUM(seconds) AS seconds, MAX(updated_at) AS updated_at
+                    FROM time_records
                     WHERE date >= ? AND date <= ? AND tag != 'Idle'
                     GROUP BY date, display_name, process_name, project, tag
                     ORDER BY date, seconds DESC
@@ -1256,8 +1314,8 @@ class TimeRecorder:
                 rows = conn.execute(
                     """
                     SELECT date, display_name, process_name, project, tag,
-                           SUM(seconds) AS seconds, MAX(end_time) AS updated_at
-                    FROM time_segments
+                           SUM(seconds) AS seconds, MAX(updated_at) AS updated_at
+                    FROM time_records
                     WHERE tag != 'Idle'
                     GROUP BY date, display_name, process_name, project, tag
                     ORDER BY date, seconds DESC
