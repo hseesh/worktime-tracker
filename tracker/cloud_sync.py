@@ -1,13 +1,13 @@
 """Cloud sync via Supabase REST API.
 
-Pushes this device's historical daily aggregates (date < today) to Supabase
-and pulls all devices' data back, merging into local SQLite. Runs once per
-day on first startup.
+Pushes this device's daily aggregates (including today) to Supabase and pulls
+all devices' data back, merging into local SQLite. Runs at startup and every
+30 minutes while enabled.
 
 Design:
 - Uses the publishable (anon) key — safe to embed in a desktop app.
 - RLS allows the anon role full access (see schema_supabase.sql).
-- Only syncs tag_time_records and time_records (daily aggregates).
+- Syncs time, tag, AI token and tool-call daily aggregates.
 - Does NOT sync time_segments (per-second data, too large for 500MB free tier).
 - Conflict policy: cloud-priority (UPSERT overwrites). Each device owns its
   own rows keyed by device_id, so there is no cross-device conflict.
@@ -16,6 +16,7 @@ Design:
 """
 
 import logging
+import threading
 from datetime import date
 from typing import Dict, List
 
@@ -53,6 +54,7 @@ class CloudSync:
         self._url = config.supabase.get("url", "").rstrip("/")
         self._anon_key = config.supabase.get("anon_key", "")
         self._device_id = config.device_id
+        self._sync_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -67,40 +69,54 @@ class CloudSync:
             h["Prefer"] = prefer
         return h
 
-    def run_if_needed(self) -> bool:
-        """Run sync if not already done today. Returns True if sync ran."""
+    def run_if_needed(self, force: bool = False) -> bool:
+        """Run sync if not already done today. Returns True if sync ran.
+
+        When *force* is True, skips the once-per-day guard (used by the
+        periodic 30-minute timer to push today's growing data).
+        """
         if not self.enabled:
             logger.info("Cloud sync is disabled, skipping.")
             return False
 
-        today = date.today().isoformat()
-        if self._config.last_sync_date == today:
-            logger.info("Cloud sync already done today (%s), skipping.", today)
+        if not self._sync_lock.acquire(blocking=False):
+            logger.info("Cloud sync already running, skipping overlapping request.")
             return False
 
-        logger.info("Starting cloud sync (device_id=%s)...", self._device_id[:8])
         try:
-            self._push()
-            self._pull()
-            self._config.set_last_sync_date(today)
-            logger.info("Cloud sync completed successfully.")
-            return True
-        except Exception as e:
-            logger.error("Cloud sync failed: %s", e, exc_info=True)
-            return False
+            today = date.today().isoformat()
+            if not force and self._config.last_sync_date == today:
+                logger.info("Cloud sync already done today (%s), skipping.", today)
+                return False
+
+            logger.info("Starting cloud sync (device_id=%s, force=%s)...",
+                        self._device_id[:8], force)
+            try:
+                self._push()
+                self._pull()
+                self._config.set_last_sync_date(today)
+                logger.info("Cloud sync completed successfully.")
+                return True
+            except Exception as e:
+                logger.error("Cloud sync failed: %s", e, exc_info=True)
+                return False
+        finally:
+            self._sync_lock.release()
 
     # ------------------------------------------------------------------ #
     #  Push: upload this device's historical data to cloud               #
     # ------------------------------------------------------------------ #
 
     def _push(self):
-        """Upload this device's time_records and tag_time_records (date < today)."""
+        """Upload this device's time_records, tag_time_records, ai_token_daily and tool_call_daily (date <= today)."""
         today = date.today().isoformat()
         self._push_tag_time_records(today)
         self._push_time_records(today)
+        self._push_ai_token_daily(today)
+        self._push_tool_call_daily(today)
 
-    def _push_tag_time_records(self, before_date: str):
-        rows = self._recorder.get_local_tag_time_records_for_sync(before_date)
+    def _push_tag_time_records(self, include_date: str):
+        rows = self._recorder.get_local_tag_time_records_for_sync(include_date)
         if not rows:
             logger.info("No tag_time_records to push.")
             return
@@ -118,8 +134,8 @@ class CloudSync:
         self._upsert_cloud("tag_time_records_cloud", payload)
         logger.info("Pushed %d tag_time_records rows.", len(payload))
 
-    def _push_time_records(self, before_date: str):
-        rows = self._recorder.get_local_time_records_for_sync(before_date)
+    def _push_time_records(self, include_date: str):
+        rows = self._recorder.get_local_time_records_for_sync(include_date)
         if not rows:
             logger.info("No time_records to push.")
             return
@@ -140,6 +156,49 @@ class CloudSync:
         self._upsert_cloud("time_records_cloud", payload)
         logger.info("Pushed %d time_records rows.", len(payload))
 
+    def _push_ai_token_daily(self, include_date: str):
+        rows = self._recorder.get_local_ai_token_daily_for_sync(include_date)
+        if not rows:
+            logger.info("No ai_token_daily rows to push.")
+            return
+
+        payload = [
+            {
+                "device_id": r["device_id"],
+                "date": r["date"],
+                "source": r["source"],
+                "input_tokens": r["input_tokens"],
+                "output_tokens": r["output_tokens"],
+                "cached_tokens": r["cached_tokens"],
+                "sessions": r["sessions"],
+                "messages": r["messages"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+        self._upsert_cloud("ai_token_daily_cloud", payload)
+        logger.info("Pushed %d ai_token_daily rows.", len(payload))
+
+    def _push_tool_call_daily(self, include_date: str):
+        rows = self._recorder.get_local_tool_call_daily_for_sync(include_date)
+        if not rows:
+            logger.info("No tool_call_daily rows to push.")
+            return
+
+        payload = [
+            {
+                "device_id": r["device_id"],
+                "date": r["date"],
+                "category": r["category"],
+                "name": r["name"],
+                "count": r["count"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+        self._upsert_cloud("tool_call_daily_cloud", payload)
+        logger.info("Pushed %d tool_call_daily rows.", len(payload))
+
     def _upsert_cloud(self, table: str, payload: List[Dict]):
         """Upsert rows to a Supabase table via REST API.
 
@@ -154,6 +213,10 @@ class CloudSync:
             on_conflict = "device_id,date,tag"
         elif table == "time_records_cloud":
             on_conflict = "device_id,date,process_name,project"
+        elif table == "ai_token_daily_cloud":
+            on_conflict = "device_id,date,source"
+        elif table == "tool_call_daily_cloud":
+            on_conflict = "device_id,date,category,name"
         else:
             raise ValueError(f"Unknown table: {table}")
 
@@ -172,16 +235,18 @@ class CloudSync:
     # ------------------------------------------------------------------ #
 
     def _pull(self):
-        """Pull all devices' data for date < today and merge into local SQLite."""
+        """Pull all devices' data for date <= today and merge into local SQLite."""
         today = date.today().isoformat()
         self._pull_tag_time_records(today)
         self._pull_time_records(today)
+        self._pull_ai_token_daily(today)
+        self._pull_tool_call_daily(today)
 
-    def _pull_tag_time_records(self, before_date: str):
+    def _pull_tag_time_records(self, include_date: str):
         rows = self._fetch_cloud(
             "tag_time_records_cloud",
             select="device_id,date,tag,seconds,updated_at",
-            lt_date=before_date,
+            lte_date=include_date,
         )
         if not rows:
             logger.info("No tag_time_records rows to pull.")
@@ -192,11 +257,11 @@ class CloudSync:
             self._recorder.upsert_cloud_tag_time_record(row)
         logger.info("Pulled and merged %d tag_time_records rows.", len(rows))
 
-    def _pull_time_records(self, before_date: str):
+    def _pull_time_records(self, include_date: str):
         rows = self._fetch_cloud(
             "time_records_cloud",
             select="device_id,date,process_name,display_name,project,tag,seconds,updated_at",
-            lt_date=before_date,
+            lte_date=include_date,
         )
         if not rows:
             logger.info("No time_records rows to pull.")
@@ -207,8 +272,38 @@ class CloudSync:
             self._recorder.upsert_cloud_time_record(row)
         logger.info("Pulled and merged %d time_records rows.", len(rows))
 
-    def _fetch_cloud(self, table: str, select: str, lt_date: str) -> List[Dict]:
-        """Fetch rows from a Supabase table where date < lt_date.
+    def _pull_ai_token_daily(self, include_date: str):
+        rows = self._fetch_cloud(
+            "ai_token_daily_cloud",
+            select="device_id,date,source,input_tokens,output_tokens,cached_tokens,sessions,messages,updated_at",
+            lte_date=include_date,
+        )
+        if not rows:
+            logger.info("No ai_token_daily rows to pull.")
+            return
+
+        for row in rows:
+            row["updated_at"] = _strip_tz(row.get("updated_at", ""))
+            self._recorder.upsert_cloud_ai_token_daily(row)
+        logger.info("Pulled and merged %d ai_token_daily rows.", len(rows))
+
+    def _pull_tool_call_daily(self, include_date: str):
+        rows = self._fetch_cloud(
+            "tool_call_daily_cloud",
+            select="device_id,date,category,name,count,updated_at",
+            lte_date=include_date,
+        )
+        if not rows:
+            logger.info("No tool_call_daily rows to pull.")
+            return
+
+        for row in rows:
+            row["updated_at"] = _strip_tz(row.get("updated_at", ""))
+            self._recorder.upsert_cloud_tool_call_daily(row)
+        logger.info("Pulled and merged %d tool_call_daily rows.", len(rows))
+
+    def _fetch_cloud(self, table: str, select: str, lte_date: str) -> List[Dict]:
+        """Fetch rows from a Supabase table where date <= lte_date.
 
         Supabase REST API returns paginated results. We follow the
         Pagination-Range / Link header or use limit + offset.
@@ -221,7 +316,7 @@ class CloudSync:
             url = f"{self._url}{REST_BASE}/{table}"
             params = {
                 "select": select,
-                "date": f"lt.{lt_date}",
+                "date": f"lte.{lte_date}",
                 "limit": limit,
                 "offset": offset,
             }

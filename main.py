@@ -6,6 +6,7 @@ Run:  python main.py
 import logging
 import sys
 import threading
+from datetime import date, datetime, timedelta
 
 from config import AppConfig
 from tracker.chrome_url_cache import ChromeUrlCache
@@ -67,18 +68,74 @@ def main():
 
     recorder = TimeRecorder(device_id=config.device_id)
 
-    # Cloud sync: runs once per day on first startup (if enabled in config).
-    # Pushes this device's historical daily aggregates to Supabase and pulls
-    # all devices' data back. Runs in a background thread so startup is not
-    # blocked by network latency.
+    # AI token cache sync: scan Devin sessions.db + Codex JSONL files and
+    # populate the ai_token_daily cache table for history (including today).
+    # Runs in a daemon thread so startup is not blocked by the slow JSONL scan.
+    def _sync_ai_tokens():
+        try:
+            recorder.sync_ai_token_cache(days=400)
+            recorder.sync_tool_call_cache(days=400)
+            logger.info("AI token + tool call cache sync complete.")
+        except Exception as e:
+            logger.warning("AI token/tool call cache sync failed: %s", e)
+
+    ai_sync_thread = threading.Thread(target=_sync_ai_tokens, name="ai-token-sync", daemon=True)
+    ai_sync_thread.start()
+
+    # Cloud sync: push/pull all daily aggregates (time + AI tokens + tool calls,
+    # including today) to/from Supabase. Runs once at startup, then every 30
+    # minutes so today's growing data stays in sync across devices.
     cloud_sync = CloudSync(config, recorder)
     if cloud_sync.enabled:
-        sync_thread = threading.Thread(
-            target=cloud_sync.run_if_needed, name="cloud-sync", daemon=True
-        )
-        sync_thread.start()
+        def _initial_cloud_sync():
+            # Avoid publishing an empty or partial cache while the startup
+            # source scan is still running.
+            ai_sync_thread.join()
+            cloud_sync.run_if_needed()
+
+        threading.Thread(
+            target=_initial_cloud_sync, name="cloud-sync", daemon=True
+        ).start()
+
+        def _periodic_sync_loop():
+            """Refresh today's caches then force cloud sync every 30 min."""
+            while True:
+                threading.Event().wait(timeout=1800)
+                try:
+                    recorder.refresh_today_ai_token_cache()
+                    recorder.refresh_today_tool_call_cache()
+                    cloud_sync.run_if_needed(force=True)
+                    logger.info("Periodic cloud sync complete.")
+                except Exception as e:
+                    logger.warning("Periodic cloud sync failed: %s", e)
+
+        threading.Thread(target=_periodic_sync_loop, name="cloud-sync-periodic", daemon=True).start()
     else:
         logger.info("Cloud sync disabled. Set supabase.enabled=true in config.json to enable.")
+
+    # Midnight loop: archive the just-ended day's caches (fills any gaps from
+    # days where the process ran continuously without restart). Force-refresh
+    # yesterday's data because the 30-min timer may have cached a partial day.
+    def _ai_token_daily_loop():
+        while True:
+            now = datetime.now()
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+            wait_seconds = (tomorrow - now).total_seconds()
+            threading.Event().wait(timeout=max(wait_seconds, 1))
+            # Force-refresh the completed day even if it was already cached by
+            # the periodic timer, then publish it immediately.
+            try:
+                yesterday = (date.today() - timedelta(days=1)).isoformat()
+                recorder.refresh_ai_token_cache_for_date(yesterday)
+                recorder.refresh_tool_call_cache_for_date(yesterday)
+                if cloud_sync.enabled:
+                    cloud_sync.run_if_needed(force=True)
+                logger.info("Yesterday cache refresh complete for %s.", yesterday)
+            except Exception as e:
+                logger.warning("Yesterday cache refresh failed: %s", e)
+
+    ai_daily_thread = threading.Thread(target=_ai_token_daily_loop, name="ai-token-daily", daemon=True)
+    ai_daily_thread.start()
 
     codex_proc_names = ("ChatGPT.exe", "codex.exe", "codex-code-mode-host.exe")
     config_indie_kws = []

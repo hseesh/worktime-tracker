@@ -9,11 +9,13 @@ import logging
 import threading
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Dict, List
 
 from flask import Flask, jsonify, send_file, request, Response
 from werkzeug.serving import make_server
 
 from config import AppConfig, DB_FILE
+from tracker.ai_token_reader import get_today_tokens, format_tokens, read_all_daily_tokens, read_daily_tool_calls, read_today_tool_calls
 from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.time_recorder import TimeRecorder
@@ -38,6 +40,42 @@ def _fmt_duration(seconds: float) -> str:
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def _summarize_cached_tokens(day_data: Dict) -> Dict:
+    """Convert cached {source: {input, output, cached, sessions, messages}} to dashboard format."""
+    total_input = total_output = total_cached = total_sessions = total_messages = 0
+    by_source = []
+    for source, entry in day_data.items():
+        inp = entry.get("input", 0)
+        out = entry.get("output", 0)
+        cached = entry.get("cached", 0)
+        sess = entry.get("sessions", 0)
+        msgs = entry.get("messages", 0)
+        total_input += inp
+        total_output += out
+        total_cached += cached
+        total_sessions += sess
+        total_messages += msgs
+        by_source.append({
+            "source": source,
+            "tokens": inp + out,
+            "input": inp,
+            "output": out,
+            "cached": cached,
+            "sessions": sess,
+            "messages": msgs,
+        })
+    by_source.sort(key=lambda x: -x["tokens"])
+    return {
+        "total_tokens": total_input + total_output,
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "cached_tokens": total_cached,
+        "sessions": total_sessions,
+        "messages": total_messages,
+        "by_source": by_source,
+    }
 
 
 class WebServer:
@@ -315,6 +353,54 @@ class WebServer:
                 parts.append("Codex: " + ", ".join(current_codex))
             current = " + ".join(parts) if parts else ""
 
+            # AI token usage (live read from Devin sessions.db + Codex JSONL)
+            try:
+                ai_tokens = get_today_tokens()
+                ai_tokens["total_display"] = format_tokens(ai_tokens["total_tokens"])
+                ai_tokens["input_display"] = format_tokens(ai_tokens["input_tokens"])
+                ai_tokens["output_display"] = format_tokens(ai_tokens["output_tokens"])
+                ai_tokens["cached_display"] = format_tokens(ai_tokens["cached_tokens"])
+                for s in ai_tokens["by_source"]:
+                    s["tokens_display"] = format_tokens(s["tokens"])
+                # Build tool call summary for display
+                tc_wrap = ai_tokens.get("tool_calls", {})
+                tc = tc_wrap.get("counts", {}) if isinstance(tc_wrap, dict) else {}
+                mcp_detail = tc_wrap.get("mcp_detail", {}) if isinstance(tc_wrap, dict) else {}
+                skill_detail = tc_wrap.get("skill_detail", {}) if isinstance(tc_wrap, dict) else {}
+                # Group MCP by server name
+                mcp_servers: Dict[str, List] = {}
+                for full_name, cnt in sorted(mcp_detail.items(), key=lambda x: -x[1]):
+                    parts = full_name.split(".", 1)
+                    server = parts[0] if len(parts) == 2 else "other"
+                    tool = parts[1] if len(parts) == 2 else full_name
+                    mcp_servers.setdefault(server, []).append({"name": tool, "count": cnt})
+                mcp_groups = []
+                for server, items in mcp_servers.items():
+                    mcp_groups.append({
+                        "server": server,
+                        "total": sum(i["count"] for i in items),
+                        "items": items,
+                    })
+                mcp_groups.sort(key=lambda x: -x["total"])
+                ai_tokens["mcp_groups"] = mcp_groups
+                # Skill detail
+                skill_items = []
+                for name, cnt in sorted(skill_detail.items(), key=lambda x: -x[1]):
+                    skill_items.append({"name": name, "count": cnt})
+                ai_tokens["skill_items"] = skill_items
+                ai_tokens["skill_total"] = tc.get("skill", sum(skill_detail.values()))
+                # Other tools not shown in UI
+                ai_tokens["other_tools"] = []
+            except Exception as e:
+                logger.warning("Failed to read AI tokens: %s", e)
+                ai_tokens = {
+                    "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
+                    "cached_tokens": 0, "sessions": 0, "messages": 0,
+                    "total_display": "0", "input_display": "0",
+                    "output_display": "0", "cached_display": "0", "by_source": [],
+                    "tool_calls": {}, "mcp_groups": [], "skill_items": [], "skill_total": 0, "other_tools": [],
+                }
+
             return jsonify({
                 "cards": {
                     "total": _fmt_duration(total),
@@ -336,6 +422,7 @@ class WebServer:
                 "codex_table": codex_table,
                 "codex_active_count": 1 if codex_current_active else 0,
                 "idle_time": _fmt_duration(self._recorder.get_today_idle_time()),
+                "ai_tokens": ai_tokens,
             })
 
         # ---- API: History ----
@@ -504,6 +591,25 @@ class WebServer:
             start = end - timedelta(days=days - 1)
             daily_tags = self._recorder.get_daily_tag_breakdown(start, end)
 
+            # AI token data: use cache for history, live for today
+            today_iso = date.today().isoformat()
+            cached_tokens = self._recorder.get_ai_token_daily_range(start, end)
+            # Enrich today's cache entry with live data
+            try:
+                live_today = read_all_daily_tokens(target_date=today_iso)
+                if today_iso in live_today:
+                    cached_tokens[today_iso] = live_today[today_iso]
+            except Exception as e:
+                logger.warning("Failed to read live AI tokens for heatmap: %s", e)
+
+            # Build per-day token totals
+            daily_token_totals = {}  # date_iso -> total_tokens
+            for d_iso, sources in cached_tokens.items():
+                day_total = 0
+                for entry in sources.values():
+                    day_total += entry.get("input", 0) + entry.get("output", 0)
+                daily_token_totals[d_iso] = day_total
+
             # Pad to whole Monday-Sunday weeks so the frontend can render a
             # GitHub-style grid without special cases at either edge.
             grid_start = start - timedelta(days=start.weekday())
@@ -524,10 +630,12 @@ class WebServer:
                         sum(v for k, v in tags.items() if k not in ("Work", "Indie")),
                         1,
                     ),
+                    "tokens": daily_token_totals.get(iso, 0) if in_range else 0,
                 })
                 cursor += timedelta(days=1)
 
             active_cells = [c for c in cells if c["date"] and c["total_seconds"] > 0]
+            token_cells = [c for c in cells if c["date"] and c["tokens"] > 0]
             return jsonify({
                 "start": start.isoformat(),
                 "end": end.isoformat(),
@@ -536,6 +644,7 @@ class WebServer:
                 "total_seconds": round(sum(c["total_seconds"] for c in active_cells), 1),
                 "work_seconds": round(sum(c["work_seconds"] for c in active_cells), 1),
                 "indie_seconds": round(sum(c["indie_seconds"] for c in active_cells), 1),
+                "total_tokens": sum(c["tokens"] for c in token_cells),
             })
 
         # ---- API: One history day -------------------------------------
@@ -571,6 +680,65 @@ class WebServer:
             for row in timeline:
                 row["duration"] = _fmt_duration(row["seconds"])
 
+            # AI token usage for this day
+            today_iso = date.today().isoformat()
+            ai_tokens = None
+            try:
+                if selected_iso == today_iso:
+                    # Live read for today
+                    ai_tokens = get_today_tokens()
+                else:
+                    # From cache for historical days
+                    cached = self._recorder.get_ai_token_daily_range(selected, selected)
+                    day_data = cached.get(selected_iso, {})
+                    if day_data:
+                        ai_tokens = _summarize_cached_tokens(day_data)
+                if ai_tokens:
+                    ai_tokens["total_display"] = format_tokens(ai_tokens["total_tokens"])
+                    ai_tokens["input_display"] = format_tokens(ai_tokens["input_tokens"])
+                    ai_tokens["output_display"] = format_tokens(ai_tokens["output_tokens"])
+                    ai_tokens["cached_display"] = format_tokens(ai_tokens["cached_tokens"])
+                    for s in ai_tokens.get("by_source", []):
+                        s["tokens_display"] = format_tokens(s["tokens"])
+            except Exception as e:
+                logger.warning("Failed to read AI tokens for %s: %s", selected_iso, e)
+
+            # Tool calls for this day
+            tool_groups = []
+            skill_items = []
+            skill_total = 0
+            try:
+                if selected_iso == today_iso:
+                    # Today: live read (sessions.db not yet cleaned)
+                    tc_wrap = read_today_tool_calls()
+                    mcp_detail = tc_wrap.get("mcp_detail", {})
+                    skill_detail = tc_wrap.get("skill_detail", {})
+                else:
+                    # History: read from cache (sessions.db may have been cleaned)
+                    cached_tc = self._recorder.get_tool_call_daily_range(selected, selected)
+                    day_tc = cached_tc.get(selected_iso, {})
+                    mcp_detail = day_tc.get("mcp", {})
+                    skill_detail = day_tc.get("skill", {})
+                # Group MCP by server
+                mcp_servers: Dict[str, List] = {}
+                for full_name, cnt in sorted(mcp_detail.items(), key=lambda x: -x[1]):
+                    parts = full_name.split(".", 1)
+                    server = parts[0] if len(parts) == 2 else "other"
+                    tool = parts[1] if len(parts) == 2 else full_name
+                    mcp_servers.setdefault(server, []).append({"name": tool, "count": cnt})
+                for server, items in mcp_servers.items():
+                    tool_groups.append({
+                        "server": server,
+                        "total": sum(i["count"] for i in items),
+                        "items": items,
+                    })
+                tool_groups.sort(key=lambda x: -x["total"])
+                for name, cnt in sorted(skill_detail.items(), key=lambda x: -x[1]):
+                    skill_items.append({"name": name, "count": cnt})
+                skill_total = sum(skill_detail.values())
+            except Exception as e:
+                logger.warning("Failed to read tool calls for %s: %s", selected_iso, e)
+
             return jsonify({
                 "date": selected_iso,
                 "total_seconds": round(total_seconds, 1),
@@ -580,6 +748,10 @@ class WebServer:
                 "tags": tags,
                 "apps": apps,
                 "timeline": timeline,
+                "ai_tokens": ai_tokens,
+                "mcp_groups": tool_groups,
+                "skill_items": skill_items,
+                "skill_total": skill_total,
             })
 
         # ---- API: Events ----

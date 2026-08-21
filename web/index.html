@@ -86,6 +86,13 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
 .stat-card .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; animation: pulse 2s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 
+/* ---- Tool call chips ---- */
+.tool-group { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.tool-group-label { font-size: 11px; font-weight: 600; color: var(--text-dim, #565f89); text-transform: uppercase; letter-spacing: .5px; margin-right: 2px; }
+.tool-group-count { color: var(--purple, #bb9af7); font-size: 12px; font-weight: 500; margin-left: 2px; }
+.tool-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 7px; border-radius: 10px; background: var(--card-alt, #1a1b26); border: 1px solid var(--border, #2a2e3f); color: var(--text-dim, #9aa5ce); }
+.tool-chip-count { color: var(--text-dim, #565f89); font-size: 10px; font-weight: 400; }
+
 /* ---- Progress bar ---- */
 .progress-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 10px; display: flex; }
 .progress-bar .fill-green { background: var(--green); height: 100%; transition: width .5s ease; }
@@ -144,6 +151,10 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
 .heatmap-cell.metric-total.level-2 { background: #e9b95e; }
 .heatmap-cell.metric-total.level-3 { background: #d58b2a; }
 .heatmap-cell.metric-total.level-4 { background: #a85b12; }
+.heatmap-cell.metric-tokens.level-1 { background: #d4c1f0; }
+.heatmap-cell.metric-tokens.level-2 { background: #b39de8; }
+.heatmap-cell.metric-tokens.level-3 { background: #9d7ad6; }
+.heatmap-cell.metric-tokens.level-4 { background: #7b4eb8; }
 .heatmap-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--text-muted); font-size: 11px; margin-top: 12px; }
 .heatmap-legend .heatmap-cell { width: 13px; cursor: default; }
 .heatmap-tooltip { position: fixed; z-index: 1000; min-width: 142px; padding: 10px 12px; border: 1px solid var(--text-faint); border-radius: 7px; background: rgba(31,35,53,.98); box-shadow: 0 8px 24px rgba(0,0,0,.35); pointer-events: none; }
@@ -153,6 +164,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
 .heatmap-tooltip-row.primary.metric-indie { color: var(--green); }
 .heatmap-tooltip-row.primary.metric-work { color: var(--accent); }
 .heatmap-tooltip-row.primary.metric-total { color: var(--yellow); }
+.heatmap-tooltip-row.primary.metric-tokens { color: #bb9af7; }
 .heatmap-tooltip-row.primary strong { font-size: 13px; }
 .day-detail { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 18px; }
 .day-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -332,6 +344,49 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
         </div>
       </div>
 
+      <!-- AI Token Usage -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="title">AI Token Usage (Today)</span></div>
+        <div style="display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;margin-bottom:10px">
+          <div>
+            <span style="font-size:28px;font-weight:700;color:var(--purple,#bb9af7)">{{ dash.ai_tokens.total_display || '0' }}</span>
+            <span class="text-dim" style="font-size:13px;margin-left:4px">tokens</span>
+          </div>
+          <div class="text-dim" style="font-size:13px">
+            {{ dash.ai_tokens.sessions || 0 }} sessions · {{ dash.ai_tokens.messages || 0 }} messages
+          </div>
+          <div class="text-dim" style="font-size:12px">
+            In {{ dash.ai_tokens.input_display || '0' }} · Out {{ dash.ai_tokens.output_display || '0' }} · Cached {{ dash.ai_tokens.cached_display || '0' }}
+          </div>
+        </div>
+        <!-- Tool calls -->
+        <div v-if="(dash.ai_tokens.mcp_groups && dash.ai_tokens.mcp_groups.length) || (dash.ai_tokens.skill_items && dash.ai_tokens.skill_items.length) || (dash.ai_tokens.other_tools && dash.ai_tokens.other_tools.length)" style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px">
+          <!-- MCP by server -->
+          <div v-for="g in dash.ai_tokens.mcp_groups" :key="'mcp-'+g.server" class="tool-group">
+            <span class="tool-group-label">{{ g.server }} <span class="tool-group-count">{{ g.total }}</span></span>
+            <span v-for="item in g.items" :key="item.name" class="tool-chip">{{ item.name }}<span class="tool-chip-count">{{ item.count }}</span></span>
+          </div>
+          <!-- Skills -->
+          <div v-if="dash.ai_tokens.skill_items && dash.ai_tokens.skill_items.length" class="tool-group">
+            <span class="tool-group-label">Skill <span class="tool-group-count">{{ dash.ai_tokens.skill_total }}</span></span>
+            <span v-for="item in dash.ai_tokens.skill_items" :key="item.name" class="tool-chip">{{ item.name }}<span class="tool-chip-count">{{ item.count }}</span></span>
+          </div>
+        </div>
+        <div v-if="dash.ai_tokens.by_source && dash.ai_tokens.by_source.length" class="table-wrap">
+          <table>
+            <thead><tr><th>Source</th><th class="text-right">Tokens</th><th class="text-right">Sessions</th><th class="text-right">Input</th><th class="text-right">Output</th><th class="text-right">Cached</th></tr></thead>
+            <tbody><tr v-for="s in dash.ai_tokens.by_source" :key="s.source">
+              <td><span class="tag" :style="{background: tokenSourceColor(s.source), color: '#fff'}">{{ s.source }}</span></td>
+              <td class="text-right" style="font-weight:600;color:var(--purple,#bb9af7)">{{ s.tokens_display }}</td>
+              <td class="text-right text-dim">{{ s.sessions }}</td>
+              <td class="text-right text-dim">{{ s.input }}</td>
+              <td class="text-right text-dim">{{ s.output }}</td>
+              <td class="text-right text-dim">{{ s.cached }}</td>
+            </tr></tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- Indie/Work split bar -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-header"><span class="title">Indie / Work Split</span></div>
@@ -482,11 +537,12 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
             <option value="indie">Indie</option>
             <option value="work">Work</option>
             <option value="total">Total</option>
+            <option value="tokens">Tokens</option>
           </select>
         </div>
         <div class="heatmap-summary">
           <span v-if="heatmapLoading">Loading Daily Activity…</span>
-          <span v-else>{{ formatDurationSeconds(heatmap.total_seconds) }} tracked · {{ heatmap.days_with_data }} days with activity · {{ heatmap.start }} to {{ heatmap.end }}</span>
+          <span v-else>{{ formatDurationSeconds(heatmap.total_seconds) }} tracked · {{ heatmap.days_with_data }} days with activity · {{ heatmap.start }} to {{ heatmap.end }}<span v-if="heatmap.total_tokens"> · {{ formatTokens(heatmap.total_tokens) }} tokens</span></span>
         </div>
         <div ref="heatmapScroll" class="heatmap-scroll">
           <div class="heatmap-layout">
@@ -519,7 +575,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
         </div>
         <div v-if="heatmapTooltip.visible" class="heatmap-tooltip" :style="{left: heatmapTooltip.x + 'px', top: heatmapTooltip.y + 'px'}">
           <div v-for="row in heatmapTooltipRows(heatmapTooltip.cell)" :key="row.metric" class="heatmap-tooltip-row" :class="[{primary: row.primary}, 'metric-' + row.metric]">
-            <span>{{ row.label }}</span><strong>{{ formatDurationSeconds(row.seconds) }}</strong>
+            <span>{{ row.label }}</span><strong v-if="row.isTokens">{{ formatTokens(row.seconds) }}</strong><strong v-else>{{ formatDurationSeconds(row.seconds) }}</strong>
           </div>
         </div>
 
@@ -533,6 +589,46 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
             <div class="day-detail-stat"><div class="label">Idle</div><div class="value dim">{{ dayDetail.idle }}</div></div>
             <div v-for="tag in dayDetail.tags.slice(0, 3)" :key="tag.tag" class="day-detail-stat">
               <div class="label">{{ tag.tag }}</div><div class="value" :style="{color: tagColor(tag.tag)}">{{ tag.duration }}</div>
+            </div>
+          </div>
+          <!-- AI Token + Tool calls for this day -->
+          <div v-if="dayDetail.ai_tokens" style="margin-bottom:16px;padding:12px 14px;border:1px solid var(--border-light);border-radius:8px">
+            <div style="display:flex;align-items:baseline;gap:20px;flex-wrap:wrap;margin-bottom:8px">
+              <div>
+                <span style="font-size:22px;font-weight:700;color:var(--purple,#bb9af7)">{{ dayDetail.ai_tokens.total_display || '0' }}</span>
+                <span class="text-dim" style="font-size:12px;margin-left:3px">tokens</span>
+              </div>
+              <div class="text-dim" style="font-size:12px">
+                {{ dayDetail.ai_tokens.sessions || 0 }} sessions · {{ dayDetail.ai_tokens.messages || 0 }} messages
+              </div>
+              <div class="text-dim" style="font-size:11px">
+                In {{ dayDetail.ai_tokens.input_display || '0' }} · Out {{ dayDetail.ai_tokens.output_display || '0' }} · Cached {{ dayDetail.ai_tokens.cached_display || '0' }}
+              </div>
+            </div>
+            <!-- Tool calls -->
+            <div v-if="(dayDetail.mcp_groups && dayDetail.mcp_groups.length) || (dayDetail.skill_items && dayDetail.skill_items.length)" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;margin-bottom:10px">
+              <div v-for="g in dayDetail.mcp_groups" :key="'mcp-'+g.server" class="tool-group">
+                <span class="tool-group-label">{{ g.server }} <span class="tool-group-count">{{ g.total }}</span></span>
+                <span v-for="item in g.items" :key="item.name" class="tool-chip">{{ item.name }}<span class="tool-chip-count">{{ item.count }}</span></span>
+              </div>
+              <div v-if="dayDetail.skill_items && dayDetail.skill_items.length" class="tool-group">
+                <span class="tool-group-label">Skill <span class="tool-group-count">{{ dayDetail.skill_total }}</span></span>
+                <span v-for="item in dayDetail.skill_items" :key="item.name" class="tool-chip">{{ item.name }}<span class="tool-chip-count">{{ item.count }}</span></span>
+              </div>
+            </div>
+            <!-- By source table -->
+            <div v-if="dayDetail.ai_tokens.by_source && dayDetail.ai_tokens.by_source.length" class="table-wrap">
+              <table>
+                <thead><tr><th>Source</th><th class="text-right">Tokens</th><th class="text-right">Sessions</th><th class="text-right">Input</th><th class="text-right">Output</th><th class="text-right">Cached</th></tr></thead>
+                <tbody><tr v-for="s in dayDetail.ai_tokens.by_source" :key="s.source">
+                  <td><span class="tag" :style="{background: tokenSourceColor(s.source), color: '#fff'}">{{ s.source }}</span></td>
+                  <td class="text-right" style="font-weight:600;color:var(--purple,#bb9af7)">{{ s.tokens_display }}</td>
+                  <td class="text-right text-dim">{{ s.sessions }}</td>
+                  <td class="text-right text-dim">{{ s.input }}</td>
+                  <td class="text-right text-dim">{{ s.output }}</td>
+                  <td class="text-right text-dim">{{ s.cached }}</td>
+                </tr></tbody>
+              </table>
             </div>
           </div>
           <div class="day-detail-columns">
@@ -807,15 +903,15 @@ createApp({
       { id: 'settings', label: 'Settings', icon: ICONS.settings },
     ];
 
-    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, indie_focus: '0s', work: '0s', work_pct: 0, work_focus: '0s', current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s' });
+    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, indie_focus: '0s', work: '0s', work_pct: 0, work_focus: '0s', current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s', ai_tokens: { total_tokens: 0, total_display: '0', input_display: '0', output_display: '0', cached_display: '0', sessions: 0, messages: 0, by_source: [], mcp_groups: [], skill_items: [], skill_total: 0, other_tools: [] } });
     const hist = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, avg: '0s' }, trend: [], per_app: [], tag_trend: [], period_summary: [] });
-    const heatmap = reactive({ start: '', end: '', days: [], days_with_data: 0, total_seconds: 0, work_seconds: 0, indie_seconds: 0 });
+    const heatmap = reactive({ start: '', end: '', days: [], days_with_data: 0, total_seconds: 0, work_seconds: 0, indie_seconds: 0, total_tokens: 0 });
     const heatmapMetric = ref('indie');
     const heatmapTooltip = reactive({ visible: false, x: 0, y: 0, cell: { date: '', indie_seconds: 0, work_seconds: 0, total_seconds: 0 } });
     const heatmapScroll = ref(null);
     const heatmapLoading = ref(false);
     const historyDetailsLoading = ref(false);
-    const dayDetail = reactive({ date: '', total: '0s', idle: '0s', tags: [], apps: [], timeline: [] });
+    const dayDetail = reactive({ date: '', total: '0s', idle: '0s', tags: [], apps: [], timeline: [], ai_tokens: null, mcp_groups: [], skill_items: [], skill_total: 0 });
     const eff = reactive({ focus_sessions: [], switch_frequency: [], peak_hours: [], idle_time: '0s', idle_seconds: 0 });
     const events = ref([]);
     const eventFilter = ref('all');
@@ -914,10 +1010,36 @@ createApp({
       return `${m}m`;
     }
 
+    function formatTokens(n) {
+      n = Number(n) || 0;
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return String(n);
+    }
+
+    function tokenSourceColor(source) {
+      const colors = {
+        'codex': '#10a37f',
+        'gpt-5.6-sol': '#10a37f',
+        'gpt-5.6-luna': '#1a7f64',
+        'gpt-5.6-terra': '#0d8a6b',
+        'glm-5-2': '#bb9af7',
+        'kimi-k3-high': '#7aa2f7',
+        'kimi-k3-max': '#7aa2f7',
+        'deepseek-v4-flash-high': '#e0af68',
+        'swe-1-6': '#f7768e',
+        'swe-1-7-medium': '#f7768e',
+        'gpt-5-6-luna-high': '#9ece6a',
+        'gpt-5-6-luna-medium': '#9ece6a',
+      };
+      return colors[source] || '#565f89';
+    }
+
     function heatmapValue(cell) {
       if (!cell || !cell.date) return 0;
       if (heatmapMetric.value === 'work') return cell.work_seconds || 0;
       if (heatmapMetric.value === 'total') return cell.total_seconds || 0;
+      if (heatmapMetric.value === 'tokens') return cell.tokens || 0;
       return cell.indie_seconds || 0;
     }
 
@@ -969,24 +1091,32 @@ createApp({
 
     function heatmapTitle(cell) {
       if (!cell || !cell.date) return '';
-      return `${cell.date} · Total ${formatDurationSeconds(cell.total_seconds)} · Indie ${formatDurationSeconds(cell.indie_seconds)} · Work ${formatDurationSeconds(cell.work_seconds)}`;
+      const tokStr = cell.tokens ? ` · Tokens ${formatTokens(cell.tokens)}` : '';
+      return `${cell.date} · Total ${formatDurationSeconds(cell.total_seconds)} · Indie ${formatDurationSeconds(cell.indie_seconds)} · Work ${formatDurationSeconds(cell.work_seconds)}${tokStr}`;
     }
 
     function heatmapTooltipRows(cell) {
       if (!cell || !cell.date) return [];
-      const labels = { indie: 'Indie', total: 'Total', work: 'Work' };
+      const labels = { indie: 'Indie', total: 'Total', work: 'Work', tokens: 'Tokens' };
       const seconds = {
         indie: cell.indie_seconds || 0,
         total: cell.total_seconds || 0,
         work: cell.work_seconds || 0,
+        tokens: cell.tokens || 0,
       };
       const order = [heatmapMetric.value, 'total', 'indie', 'work'].filter((metric, index, all) => all.indexOf(metric) === index);
-      return order.slice(0, 3).map(metric => ({
+      const rows = order.slice(0, 3).map(metric => ({
         metric,
         label: labels[metric],
         seconds: seconds[metric],
         primary: metric === heatmapMetric.value,
+        isTokens: metric === 'tokens',
       }));
+      // Always append token info if available
+      if (cell.tokens && cell.tokens > 0 && !rows.some(row => row.metric === 'tokens')) {
+        rows.push({ metric: 'tokens', label: 'Tokens', seconds: cell.tokens, primary: heatmapMetric.value === 'tokens', isTokens: true });
+      }
+      return rows;
     }
 
     function positionHeatmapCurrent() {
@@ -1027,6 +1157,10 @@ createApp({
       dayDetail.tags = [];
       dayDetail.apps = [];
       dayDetail.timeline = [];
+      dayDetail.ai_tokens = null;
+      dayDetail.mcp_groups = [];
+      dayDetail.skill_items = [];
+      dayDetail.skill_total = 0;
     }
 
     function dayTimelineHours() {
@@ -1192,8 +1326,12 @@ createApp({
       if (histDays.value === 'all') {
         window.open(`/api/export`, '_blank');
       } else {
-        const end = new Date().toISOString().slice(0, 10);
-        const start = new Date(Date.now() - (histDays.value - 1) * 86400000).toISOString().slice(0, 10);
+        const toLocalIsoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const endDate = new Date();
+        const startDate = new Date(endDate);
+        startDate.setDate(startDate.getDate() - (histDays.value - 1));
+        const end = toLocalIsoDate(endDate);
+        const start = toLocalIsoDate(startDate);
         window.open(`/api/export?start=${start}&end=${end}`, '_blank');
       }
     }
@@ -1359,7 +1497,7 @@ createApp({
       pieChart, trendChart, timelineChart, tagTrendChart, periodChart, peakHoursChart, switchFreqChart,
       loadHistory, loadEvents, saveSettings, addProcess, removeProcess, saveIndieKeywords, exportCsv,
       addTag, updateTagColor, deleteTag, setProcessTag, saveTagKeywordRules, saveUrlTagRules, changeAppTag,
-      formatDurationSeconds, heatmapWeeks, heatmapLevel, heatmapTitle, heatmapTooltipRows, showHeatmapTooltip, moveHeatmapTooltip, hideHeatmapTooltip, selectHeatmapDate, clearDayDetail, positionHeatmapCurrent, dayTimelineHours, dayTimelineTags, dayTimelineCellWidth, dayTimelineCellTitle, dayTimelineTagTotal,
+      formatDurationSeconds, formatTokens, tokenSourceColor, heatmapWeeks, heatmapLevel, heatmapTitle, heatmapTooltipRows, showHeatmapTooltip, moveHeatmapTooltip, hideHeatmapTooltip, selectHeatmapDate, clearDayDetail, positionHeatmapCurrent, dayTimelineHours, dayTimelineTags, dayTimelineCellWidth, dayTimelineCellTitle, dayTimelineTagTotal,
       tagColor, tagStyle, dotStyle,
     };
   }

@@ -118,13 +118,10 @@ class TestCodexActivity(unittest.TestCase):
         self.assertIsNotNone(active)
         self.assertGreaterEqual(active["idle_seconds"], 0)
 
-    def test_active_project_remains_active_until_stop(self):
+    def test_active_project_expires_after_heartbeat_timeout(self):
         project = r"D:\Data\unity\P1-c\Assets"
         self.manager.handle_event("SessionStart", "s1", project, self._now(-3600))
 
-        self.assertEqual(self.manager.get_current_active_project()["project"], project)
-
-        self.manager.handle_event("Stop", "s1", project, self._now())
         self.assertIsNone(self.manager.get_current_active_project())
 
     def test_validation(self):

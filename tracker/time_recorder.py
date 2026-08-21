@@ -117,6 +117,43 @@ CREATE TABLE IF NOT EXISTS chrome_url_events (
 );
 """
 
+_CREATE_AI_TOKEN_SQL = """
+CREATE TABLE IF NOT EXISTS ai_token_daily (
+    device_id     TEXT    NOT NULL DEFAULT '',
+    date           TEXT    NOT NULL,
+    source         TEXT    NOT NULL,
+    input_tokens   INTEGER NOT NULL DEFAULT 0,
+    output_tokens  INTEGER NOT NULL DEFAULT 0,
+    cached_tokens  INTEGER NOT NULL DEFAULT 0,
+    sessions       INTEGER NOT NULL DEFAULT 0,
+    messages       INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT    NOT NULL,
+    PRIMARY KEY (device_id, date, source)
+);
+"""
+
+_CREATE_TOOL_CALL_SQL = """
+CREATE TABLE IF NOT EXISTS tool_call_daily (
+    device_id     TEXT    NOT NULL DEFAULT '',
+    date           TEXT    NOT NULL,
+    category       TEXT    NOT NULL,
+    name           TEXT    NOT NULL,
+    count          INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT    NOT NULL,
+    PRIMARY KEY (device_id, date, category, name)
+);
+"""
+
+_CREATE_CACHE_SCAN_SQL = """
+CREATE TABLE IF NOT EXISTS cache_scan_state (
+    device_id     TEXT NOT NULL DEFAULT '',
+    kind          TEXT NOT NULL,
+    date          TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (device_id, kind, date)
+);
+"""
+
 
 class TimeRecorder:
     """Thread-safe-ish SQLite recorder.
@@ -140,6 +177,9 @@ class TimeRecorder:
             conn.execute(_CREATE_SEGMENTS_SQL)
             conn.execute(_CREATE_FOCUS_SQL)
             conn.execute(_CREATE_TAG_TOTALS_SQL)
+            conn.execute(_CREATE_AI_TOKEN_SQL)
+            conn.execute(_CREATE_TOOL_CALL_SQL)
+            conn.execute(_CREATE_CACHE_SCAN_SQL)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_time_segments_date_tag "
                 "ON time_segments (date, tag)"
@@ -148,6 +188,8 @@ class TimeRecorder:
             self._migrate_add_tag(conn)
             self._migrate_add_segment_project(conn)
             self._migrate_add_device_id(conn)
+            self._migrate_ai_cache_device_id(conn)
+            self._migrate_tool_cache_device_id(conn)
             # History range app breakdowns read these fields together. Keep a
             # covering index so the aggregation does not fetch every segment
             # row from the table for each History request.
@@ -288,6 +330,71 @@ class TimeRecorder:
             conn.execute("DROP TABLE tag_time_records")
             conn.execute("ALTER TABLE tag_time_records_new RENAME TO tag_time_records")
 
+    def _migrate_ai_cache_device_id(self, conn):
+        """Preserve legacy device-local AI rows while adding device identity."""
+        cols = conn.execute("PRAGMA table_info(ai_token_daily)").fetchall()
+        if "device_id" in {c["name"] for c in cols}:
+            return
+        conn.execute(
+            """
+            CREATE TABLE ai_token_daily_new (
+                device_id TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                sessions INTEGER NOT NULL DEFAULT 0,
+                messages INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, date, source)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ai_token_daily_new
+                (device_id, date, source, input_tokens, output_tokens,
+                 cached_tokens, sessions, messages, updated_at)
+            SELECT ?, date, source, input_tokens, output_tokens,
+                   cached_tokens, sessions, messages, updated_at
+            FROM ai_token_daily
+            """,
+            (self._device_id,),
+        )
+        conn.execute("DROP TABLE ai_token_daily")
+        conn.execute("ALTER TABLE ai_token_daily_new RENAME TO ai_token_daily")
+
+    def _migrate_tool_cache_device_id(self, conn):
+        """Preserve legacy device-local tool rows while adding device identity."""
+        cols = conn.execute("PRAGMA table_info(tool_call_daily)").fetchall()
+        if "device_id" in {c["name"] for c in cols}:
+            return
+        conn.execute(
+            """
+            CREATE TABLE tool_call_daily_new (
+                device_id TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL,
+                category TEXT NOT NULL,
+                name TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, date, category, name)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO tool_call_daily_new
+                (device_id, date, category, name, count, updated_at)
+            SELECT ?, date, category, name, count, updated_at
+            FROM tool_call_daily
+            """,
+            (self._device_id,),
+        )
+        conn.execute("DROP TABLE tool_call_daily")
+        conn.execute("ALTER TABLE tool_call_daily_new RENAME TO tool_call_daily")
+
     @staticmethod
     def _seed_default_tags(conn):
         """Insert built-in tags if not present."""
@@ -344,6 +451,43 @@ class TimeRecorder:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
+
+    def _rebuild_local_tag_totals_conn(self, conn, dates):
+        """Recompute de-duplicated local tag totals after historical relabeling."""
+        dates = sorted(set(dates))
+        if not dates:
+            return
+        placeholders = ",".join("?" for _ in dates)
+        rows = conn.execute(
+            f"SELECT date, start_time, end_time, tag FROM time_segments "
+            f"WHERE date IN ({placeholders}) AND tag != 'Idle' "
+            "ORDER BY date, tag, start_time, end_time",
+            dates,
+        ).fetchall()
+        conn.execute(
+            f"DELETE FROM tag_time_records WHERE device_id = ? "
+            f"AND date IN ({placeholders})",
+            (self._device_id, *dates),
+        )
+        grouped = {}
+        for row in rows:
+            grouped.setdefault((row["date"], row["tag"]), []).append(
+                (datetime.fromisoformat(row["start_time"]), datetime.fromisoformat(row["end_time"]))
+            )
+        now = datetime.now().isoformat(timespec="seconds")
+        for (d_iso, tag), intervals in grouped.items():
+            merged = []
+            for start, end in intervals:
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            seconds = sum((end - start).total_seconds() for start, end in merged)
+            conn.execute(
+                "INSERT INTO tag_time_records "
+                "(device_id, date, tag, seconds, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (self._device_id, d_iso, tag, seconds, now),
+            )
 
     def update_tags_from_process_tags(self, process_tags: dict):
         """Update time_records.tag for processes whose tag has changed in config.
@@ -413,6 +557,12 @@ class TimeRecorder:
                 record_where = "device_id = ? AND process_name = ? COLLATE NOCASE AND display_name = ?"
                 record_args = (self._device_id, process_name, display_name)
 
+            affected_dates = [
+                row["date"] for row in conn.execute(
+                    f"SELECT DISTINCT date FROM time_segments WHERE {segment_where}",
+                    segment_args,
+                ).fetchall()
+            ]
             conn.execute(
                 f"UPDATE time_segments SET tag = ? WHERE {segment_where}",
                 (new_tag, *segment_args),
@@ -421,6 +571,7 @@ class TimeRecorder:
                 f"UPDATE time_records SET tag = ? WHERE {record_where}",
                 (new_tag, *record_args),
             )
+            self._rebuild_local_tag_totals_conn(conn, affected_dates)
             conn.commit()
         finally:
             conn.close()
@@ -658,11 +809,19 @@ class TimeRecorder:
         return [dict(r) for r in [*rows, *fallback]]
 
     def get_first_record_date(self) -> Optional[str]:
-        """Return the first date available in the canonical segment table."""
+        """Return the first local or cloud-synced work date."""
         conn = self._conn()
         try:
             row = conn.execute(
-                "SELECT MIN(date) AS date FROM time_segments WHERE tag != 'Idle'"
+                """
+                SELECT MIN(date) AS date FROM (
+                    SELECT date FROM time_segments WHERE tag != 'Idle'
+                    UNION ALL
+                    SELECT date FROM time_records WHERE tag != 'Idle'
+                    UNION ALL
+                    SELECT date FROM tag_time_records
+                )
+                """
             ).fetchone()
         finally:
             conn.close()
@@ -720,27 +879,27 @@ class TimeRecorder:
     #  Cloud sync helpers                                                 #
     # ------------------------------------------------------------------ #
 
-    def get_local_time_records_for_sync(self, before_date: str) -> List[Dict]:
-        """Return this device's time_records rows for dates < before_date (ISO)."""
+    def get_local_time_records_for_sync(self, include_date: str) -> List[Dict]:
+        """Return this device's time_records rows for dates <= include_date (ISO)."""
         conn = self._conn()
         try:
             rows = conn.execute(
                 "SELECT device_id, date, process_name, display_name, project, tag, seconds, updated_at "
-                "FROM time_records WHERE device_id = ? AND date < ?",
-                (self._device_id, before_date),
+                "FROM time_records WHERE device_id = ? AND date <= ?",
+                (self._device_id, include_date),
             ).fetchall()
         finally:
             conn.close()
         return [dict(r) for r in rows]
 
-    def get_local_tag_time_records_for_sync(self, before_date: str) -> List[Dict]:
-        """Return this device's tag_time_records rows for dates < before_date (ISO)."""
+    def get_local_tag_time_records_for_sync(self, include_date: str) -> List[Dict]:
+        """Return this device's tag_time_records rows for dates <= include_date (ISO)."""
         conn = self._conn()
         try:
             rows = conn.execute(
                 "SELECT device_id, date, tag, seconds, updated_at "
-                "FROM tag_time_records WHERE device_id = ? AND date < ?",
-                (self._device_id, before_date),
+                "FROM tag_time_records WHERE device_id = ? AND date <= ?",
+                (self._device_id, include_date),
             ).fetchall()
         finally:
             conn.close()
@@ -752,6 +911,10 @@ class TimeRecorder:
         Conflict policy: cloud-priority (REPLACE). The caller should only
         pass rows with date < today so today's local recording is untouched.
         """
+        if row.get("device_id") == self._device_id and row.get("date") == date.today().isoformat():
+            # The tracker may have added more seconds after this row was pushed.
+            # Never replace the live local row with its older cloud snapshot.
+            return
         conn = self._conn()
         try:
             conn.execute(
@@ -777,6 +940,8 @@ class TimeRecorder:
 
     def upsert_cloud_tag_time_record(self, row: Dict):
         """Insert or replace a tag_time_records row from cloud sync."""
+        if row.get("device_id") == self._device_id and row.get("date") == date.today().isoformat():
+            return
         conn = self._conn()
         try:
             conn.execute(
@@ -790,6 +955,51 @@ class TimeRecorder:
                     row["date"],
                     row["tag"],
                     row["seconds"],
+                    row.get("updated_at", ""),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_local_ai_token_daily_for_sync(self, include_date: str) -> List[Dict]:
+        """Return this device's ai_token_daily rows for dates <= include_date.
+
+        Only this device's rows are uploaded; pulled devices remain local cache
+        rows and must never be re-published under this device's identity.
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT device_id, date, source, input_tokens, output_tokens, cached_tokens, "
+                "sessions, messages, updated_at FROM ai_token_daily "
+                "WHERE device_id = ? AND date <= ?",
+                (self._device_id, include_date),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def upsert_cloud_ai_token_daily(self, row: Dict):
+        """Insert or replace an ai_token_daily row from cloud sync."""
+        if row.get("device_id") == self._device_id and row.get("date") == date.today().isoformat():
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO ai_token_daily "
+                "(device_id, date, source, input_tokens, output_tokens, cached_tokens, "
+                "sessions, messages, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["device_id"],
+                    row["date"],
+                    row["source"],
+                    row.get("input_tokens", 0),
+                    row.get("output_tokens", 0),
+                    row.get("cached_tokens", 0),
+                    row.get("sessions", 0),
+                    row.get("messages", 0),
                     row.get("updated_at", ""),
                 ),
             )
@@ -958,6 +1168,280 @@ class TimeRecorder:
         finally:
             conn.close()
 
+    # ---- AI token daily cache ---------------------------------------
+
+    def upsert_ai_token_daily(self, d_iso: str, source: str, input_tokens: int,
+                              output_tokens: int, cached_tokens: int,
+                              sessions: int, messages: int):
+        """Insert or update one row in ai_token_daily cache."""
+        conn = self._conn()
+        try:
+            now = datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT INTO ai_token_daily (device_id, date, source, input_tokens, output_tokens, "
+                "cached_tokens, sessions, messages, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(device_id, date, source) DO UPDATE SET "
+                "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, "
+                "cached_tokens=excluded.cached_tokens, sessions=excluded.sessions, "
+                "messages=excluded.messages, updated_at=excluded.updated_at",
+                (self._device_id, d_iso, source, input_tokens, output_tokens, cached_tokens,
+                 sessions, messages, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_ai_token_daily_range(self, start: date, end: date) -> Dict[str, Dict[str, Dict]]:
+        """Return cached {date_iso: {source: {input, output, cached, sessions, messages}}}."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT date, source, SUM(input_tokens) AS input_tokens, "
+                "SUM(output_tokens) AS output_tokens, SUM(cached_tokens) AS cached_tokens, "
+                "SUM(sessions) AS sessions, SUM(messages) AS messages "
+                "FROM ai_token_daily WHERE date >= ? AND date <= ? "
+                "GROUP BY date, source ORDER BY date, source",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        finally:
+            conn.close()
+        result: Dict[str, Dict[str, Dict]] = {}
+        for r in rows:
+            result.setdefault(r["date"], {})[r["source"]] = {
+                "input": r["input_tokens"],
+                "output": r["output_tokens"],
+                "cached": r["cached_tokens"],
+                "sessions": r["sessions"],
+                "messages": r["messages"],
+            }
+        return result
+
+    def get_ai_token_today_cached(self) -> Dict[str, Dict]:
+        """Return cached {source: {input, output, cached, sessions, messages}} for today."""
+        today = date.today().isoformat()
+        rng = self.get_ai_token_daily_range(date.today(), date.today())
+        return rng.get(today, {})
+
+    def get_cached_token_dates(self) -> set:
+        """Return dates whose local source scan completed, including empty days."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT date FROM cache_scan_state WHERE device_id = ? AND kind = 'ai_token'",
+                (self._device_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r["date"] for r in rows}
+
+    def _mark_cache_dates_scanned(self, kind: str, dates):
+        now = datetime.now().isoformat(timespec="seconds")
+        conn = self._conn()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO cache_scan_state "
+                "(device_id, kind, date, updated_at) VALUES (?, ?, ?, ?)",
+                [(self._device_id, kind, d_iso, now) for d_iso in dates],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _replace_local_ai_token_date(self, d_iso: str, day_data: Dict[str, Dict]):
+        """Atomically replace one device-local day so removed sources do not linger."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM ai_token_daily WHERE device_id = ? AND date = ?",
+                (self._device_id, d_iso),
+            )
+            now = datetime.now().isoformat(timespec="seconds")
+            for source, entry in day_data.items():
+                conn.execute(
+                    "INSERT INTO ai_token_daily "
+                    "(device_id, date, source, input_tokens, output_tokens, cached_tokens, "
+                    "sessions, messages, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self._device_id, d_iso, source,
+                        entry.get("input", 0), entry.get("output", 0),
+                        entry.get("cached", 0), entry.get("sessions", 0),
+                        entry.get("messages", 0), now,
+                    ),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO cache_scan_state "
+                "(device_id, kind, date, updated_at) VALUES (?, 'ai_token', ?, ?)",
+                (self._device_id, d_iso, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def sync_ai_token_cache(self, days: int = 400):
+        """Scan source data and populate cache for the last *days* days.
+
+        Fills gaps for dates not yet cached (including today). Call once at
+        startup or periodically.
+        """
+        from tracker.ai_token_reader import read_all_daily_tokens
+        cached_dates = self.get_cached_token_dates()
+        end = date.today()
+        start = end - timedelta(days=days - 1)
+        requested_dates = {
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        }
+        missing_dates = requested_dates - cached_dates
+        if not missing_dates:
+            return
+        # One full scan fills every missing day. Empty days are marked too, so
+        # the next startup does not repeat the expensive filesystem traversal.
+        all_data = read_all_daily_tokens()
+        for d_iso in sorted(missing_dates):
+            self._replace_local_ai_token_date(d_iso, all_data.get(d_iso, {}))
+
+    def refresh_ai_token_cache_for_date(self, d_iso: str):
+        """Force-refresh a date, including a previously cached completed day."""
+        from tracker.ai_token_reader import read_all_daily_tokens
+        all_data = read_all_daily_tokens(target_date=d_iso)
+        self._replace_local_ai_token_date(d_iso, all_data.get(d_iso, {}))
+
+    def refresh_today_ai_token_cache(self):
+        """Refresh today's AI token cache from live source data.
+
+        Called periodically (e.g. every 30 min) so today's cached values
+        stay fresh for cloud sync. The dashboard/heatmap still read live
+        for display; this is only for the cloud sync push.
+        """
+        self.refresh_ai_token_cache_for_date(date.today().isoformat())
+
+    # ------------------------------------------------------------------ #
+    #  Tool call daily cache (MCP / Skill aggregated counts)             #
+    # ------------------------------------------------------------------ #
+
+    def upsert_tool_call_daily(self, d_iso: str, category: str, name: str, count: int):
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO tool_call_daily "
+                "(device_id, date, category, name, count, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self._device_id, d_iso, category, name, count,
+                 datetime.now().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_tool_call_daily_range(self, start: date, end: date) -> Dict[str, Dict[str, Dict[str, int]]]:
+        """Return {date_iso: {category: {name: count}}}."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT date, category, name, SUM(count) AS count FROM tool_call_daily "
+                "WHERE date >= ? AND date <= ? GROUP BY date, category, name "
+                "ORDER BY date, category, name",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        finally:
+            conn.close()
+        result: Dict[str, Dict[str, Dict[str, int]]] = {}
+        for r in rows:
+            result.setdefault(r["date"], {}).setdefault(r["category"], {})[r["name"]] = r["count"]
+        return result
+
+    def get_cached_tool_call_dates(self) -> set:
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT date FROM cache_scan_state WHERE device_id = ? AND kind = 'tool_call'",
+                (self._device_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r["date"] for r in rows}
+
+    def _replace_local_tool_call_date(self, d_iso: str, day_data: Dict[str, Dict[str, int]]):
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM tool_call_daily WHERE device_id = ? AND date = ?",
+                (self._device_id, d_iso),
+            )
+            now = datetime.now().isoformat(timespec="seconds")
+            for category, items in day_data.items():
+                for name, count in items.items():
+                    conn.execute(
+                        "INSERT INTO tool_call_daily "
+                        "(device_id, date, category, name, count, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (self._device_id, d_iso, category, name, count, now),
+                    )
+            conn.execute(
+                "INSERT OR REPLACE INTO cache_scan_state "
+                "(device_id, kind, date, updated_at) VALUES (?, 'tool_call', ?, ?)",
+                (self._device_id, d_iso, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def sync_tool_call_cache(self, days: int = 400):
+        """Scan source data and populate tool_call_daily cache for uncached dates."""
+        from tracker.ai_token_reader import read_all_daily_tool_calls
+        cached_dates = self.get_cached_tool_call_dates()
+        end = date.today()
+        start = end - timedelta(days=days - 1)
+        requested_dates = {
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        }
+        missing_dates = requested_dates - cached_dates
+        if not missing_dates:
+            return
+        all_data = read_all_daily_tool_calls(start.isoformat(), end.isoformat())
+        for d_iso in sorted(missing_dates):
+            self._replace_local_tool_call_date(d_iso, all_data.get(d_iso, {}))
+
+    def refresh_tool_call_cache_for_date(self, d_iso: str):
+        from tracker.ai_token_reader import read_all_daily_tool_calls
+        data = read_all_daily_tool_calls(d_iso, d_iso)
+        self._replace_local_tool_call_date(d_iso, data.get(d_iso, {}))
+
+    def refresh_today_tool_call_cache(self):
+        """Refresh today's tool call cache from live source data."""
+        self.refresh_tool_call_cache_for_date(date.today().isoformat())
+
+    def get_local_tool_call_daily_for_sync(self, include_date: str) -> List[Dict]:
+        """Return this device's tool_call_daily rows for dates <= include_date."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT device_id, date, category, name, count, updated_at "
+                "FROM tool_call_daily WHERE device_id = ? AND date <= ?",
+                (self._device_id, include_date),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def upsert_cloud_tool_call_daily(self, row: Dict):
+        if row.get("device_id") == self._device_id and row.get("date") == date.today().isoformat():
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO tool_call_daily "
+                "(device_id, date, category, name, count, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (row["device_id"], row["date"], row["category"], row["name"],
+                 row["count"], row.get("updated_at", "")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def get_codex_today_summary(self) -> List[Dict]:
         """Return [{project_name, project, seconds}] for today, sorted desc."""
         today = date.today().isoformat()
@@ -1034,8 +1518,16 @@ class TimeRecorder:
             params.append(tag_id)
             conn.execute(f"UPDATE tags SET {', '.join(sets)} WHERE id = ?", params)
             if name is not None and not is_system and name != tag["name"]:
+                affected_dates = [
+                    row["date"] for row in conn.execute(
+                        "SELECT DISTINCT date FROM time_segments WHERE tag = ?",
+                        (tag["name"],),
+                    ).fetchall()
+                ]
                 conn.execute("UPDATE time_records SET tag = ? WHERE device_id = ? AND tag = ?", (name, self._device_id, tag["name"]))
                 conn.execute("UPDATE time_segments SET tag = ? WHERE tag = ?", (name, tag["name"]))
+                conn.execute("UPDATE focus_time_records SET tag = ? WHERE tag = ?", (name, tag["name"]))
+                self._rebuild_local_tag_totals_conn(conn, affected_dates)
             conn.commit()
         finally:
             conn.close()
@@ -1048,8 +1540,16 @@ class TimeRecorder:
             if not tag or tag["is_system"]:
                 return False
             # Reassign records to Other (only this device's rows in time_records)
+            affected_dates = [
+                row["date"] for row in conn.execute(
+                    "SELECT DISTINCT date FROM time_segments WHERE tag = ?",
+                    (tag["name"],),
+                ).fetchall()
+            ]
             conn.execute("UPDATE time_records SET tag = 'Other' WHERE device_id = ? AND tag = ?", (self._device_id, tag["name"]))
             conn.execute("UPDATE time_segments SET tag = 'Other' WHERE tag = ?", (tag["name"],))
+            conn.execute("UPDATE focus_time_records SET tag = 'Other' WHERE tag = ?", (tag["name"],))
+            self._rebuild_local_tag_totals_conn(conn, affected_dates)
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
             conn.commit()
         finally:

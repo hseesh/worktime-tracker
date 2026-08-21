@@ -1,7 +1,7 @@
 -- WorkTime Tracker — Supabase cloud sync schema
 -- Run this in Supabase Dashboard → SQL Editor.
 --
--- Creates two tables for daily aggregate snapshots and RLS policies
+-- Creates four tables for daily aggregate snapshots and RLS policies
 -- that allow the publishable (anon) key to read/write all rows.
 -- (No Supabase Auth login; device_id separates data per device.)
 
@@ -46,14 +46,74 @@ ALTER TABLE time_records_cloud ENABLE ROW LEVEL SECURITY;
 -- Allow the anon role (publishable key) full read/write access.
 -- This is safe ONLY if the publishable key is not distributed publicly.
 -- For a personal desktop app used on your own machines, this is acceptable.
+DROP POLICY IF EXISTS "anon full access tag_time_records_cloud"
+    ON tag_time_records_cloud;
 CREATE POLICY "anon full access tag_time_records_cloud"
     ON tag_time_records_cloud
     FOR ALL TO anon
     USING (true)
     WITH CHECK (true);
 
+DROP POLICY IF EXISTS "anon full access time_records_cloud"
+    ON time_records_cloud;
 CREATE POLICY "anon full access time_records_cloud"
     ON time_records_cloud
+    FOR ALL TO anon
+    USING (true)
+    WITH CHECK (true);
+
+-- ============================================================
+-- Table 3: ai_token_daily_cloud
+-- Per-device daily AI token usage (Devin, Codex, etc.)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_token_daily_cloud (
+    id              BIGSERIAL PRIMARY KEY,
+    device_id       TEXT NOT NULL,
+    date            DATE NOT NULL,
+    source          TEXT NOT NULL,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cached_tokens   INTEGER NOT NULL DEFAULT 0,
+    sessions        INTEGER NOT NULL DEFAULT 0,
+    messages        INTEGER NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(device_id, date, source)
+);
+
+-- ============================================================
+-- Row Level Security
+-- ============================================================
+ALTER TABLE ai_token_daily_cloud ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "anon full access ai_token_daily_cloud"
+    ON ai_token_daily_cloud;
+CREATE POLICY "anon full access ai_token_daily_cloud"
+    ON ai_token_daily_cloud
+    FOR ALL TO anon
+    USING (true)
+    WITH CHECK (true);
+
+-- ============================================================
+-- Table 4: tool_call_daily_cloud
+-- Per-device daily tool call aggregated counts (MCP / Skill)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tool_call_daily_cloud (
+    id          BIGSERIAL PRIMARY KEY,
+    device_id   TEXT NOT NULL,
+    date        DATE NOT NULL,
+    category    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(device_id, date, category, name)
+);
+
+ALTER TABLE tool_call_daily_cloud ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "anon full access tool_call_daily_cloud"
+    ON tool_call_daily_cloud;
+CREATE POLICY "anon full access tool_call_daily_cloud"
+    ON tool_call_daily_cloud
     FOR ALL TO anon
     USING (true)
     WITH CHECK (true);
@@ -66,3 +126,9 @@ CREATE INDEX IF NOT EXISTS idx_tag_cloud_device_date
 
 CREATE INDEX IF NOT EXISTS idx_time_cloud_device_date
     ON time_records_cloud (device_id, date);
+
+CREATE INDEX IF NOT EXISTS idx_ai_token_cloud_device_date
+    ON ai_token_daily_cloud (device_id, date);
+
+CREATE INDEX IF NOT EXISTS idx_tool_call_cloud_device_date
+    ON tool_call_daily_cloud (device_id, date);

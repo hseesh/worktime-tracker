@@ -4,7 +4,8 @@ Design:
   - HTTP hook events mark which project is "active" (Codex is working on it).
   - No time accumulation here — time is counted by tracking_engine when Codex
     process is in the foreground window.
-  - A project stays active until every associated session sends Stop.
+  - A project stays active for five minutes after its latest heartbeat; Stop
+    can end it earlier.
   - Timer eligibility is further gated by Codex being the foreground window.
   - Duplicate events (same sessionId + event + observedAt) are idempotent.
 """
@@ -19,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 MAX_FUTURE_SKEW_SECONDS = 60    # tolerate minor clock skew, reject future events beyond this
+ACTIVE_TIMEOUT_SECONDS = 300
 VALID_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
 HEARTBEAT_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
 MAX_SEEN_EVENTS = 10000
@@ -83,9 +85,21 @@ class CodexActivityManager:
                 return {"status": "ignored", "project": project}
 
     def get_active_projects(self) -> List[Dict]:
-        """Return projects with at least one started session that has not stopped."""
+        """Return projects with a live session and a recent heartbeat."""
         with self._lock:
             now = datetime.now(timezone.utc)
+            expired = {
+                project for project, last_ts in self._project_last_event.items()
+                if (now - last_ts).total_seconds() > ACTIVE_TIMEOUT_SECONDS
+            }
+            for project in expired:
+                self._project_last_event.pop(project, None)
+            if expired:
+                self._sessions = {
+                    session_id: session
+                    for session_id, session in self._sessions.items()
+                    if session["project"] not in expired
+                }
             active_project_paths = {s["project"] for s in self._sessions.values()}
             result = []
             for proj, last_ts in self._project_last_event.items():
