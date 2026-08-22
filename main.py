@@ -13,6 +13,7 @@ from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.cloud_sync import CloudSync
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.codex_event_server import CodexEventServer
+from tracker.shutdown_handler import install_shutdown_sync
 from tracker.single_instance import SingleInstanceGuard
 from tracker.time_recorder import TimeRecorder
 from tracker.tracking_engine import TrackingEngine
@@ -110,6 +111,9 @@ def main():
                     logger.warning("Periodic cloud sync failed: %s", e)
 
         threading.Thread(target=_periodic_sync_loop, name="cloud-sync-periodic", daemon=True).start()
+
+        # Intercept WM_QUERYENDSESSION so we push today's data before shutdown.
+        install_shutdown_sync(cloud_sync, recorder)
     else:
         logger.info("Cloud sync disabled. Set supabase.enabled=true in config.json to enable.")
 
@@ -170,6 +174,15 @@ def main():
             pass
 
     try:
+        # Final cloud push on normal quit (tray Quit or KeyboardInterrupt).
+        if cloud_sync.enabled:
+            try:
+                recorder.refresh_today_ai_token_cache()
+                recorder.refresh_today_tool_call_cache()
+                cloud_sync._push()
+                logger.info("Final cloud push on exit completed.")
+            except Exception as e:
+                logger.warning("Final cloud push on exit failed: %s", e)
         engine.stop()
         codex_server.stop()
         web_server.stop()
