@@ -155,6 +155,18 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
 .heatmap-cell.metric-tokens.level-2 { background: #b39de8; }
 .heatmap-cell.metric-tokens.level-3 { background: #9d7ad6; }
 .heatmap-cell.metric-tokens.level-4 { background: #7b4eb8; }
+.heatmap-cell.metric-sessions.level-1 { background: #a8d8e8; }
+.heatmap-cell.metric-sessions.level-2 { background: #7ec0db; }
+.heatmap-cell.metric-sessions.level-3 { background: #5aa5c9; }
+.heatmap-cell.metric-sessions.level-4 { background: #3a7fa8; }
+.heatmap-cell.metric-messages.level-1 { background: #c4e8b7; }
+.heatmap-cell.metric-messages.level-2 { background: #9bd68a; }
+.heatmap-cell.metric-messages.level-3 { background: #7bc468; }
+.heatmap-cell.metric-messages.level-4 { background: #5aa84a; }
+.heatmap-cell.metric-edits.level-1 { background: #e8c4a8; }
+.heatmap-cell.metric-edits.level-2 { background: #dba87e; }
+.heatmap-cell.metric-edits.level-3 { background: #c98f5a; }
+.heatmap-cell.metric-edits.level-4 { background: #a8703a; }
 .heatmap-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--text-muted); font-size: 11px; margin-top: 12px; }
 .heatmap-legend .heatmap-cell { width: 13px; cursor: default; }
 .heatmap-tooltip { position: fixed; z-index: 1000; min-width: 142px; padding: 10px 12px; border: 1px solid var(--text-faint); border-radius: 7px; background: rgba(31,35,53,.98); box-shadow: 0 8px 24px rgba(0,0,0,.35); pointer-events: none; }
@@ -165,6 +177,9 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
 .heatmap-tooltip-row.primary.metric-work { color: var(--accent); }
 .heatmap-tooltip-row.primary.metric-total { color: var(--yellow); }
 .heatmap-tooltip-row.primary.metric-tokens { color: #bb9af7; }
+.heatmap-tooltip-row.primary.metric-sessions { color: #5aa5c9; }
+.heatmap-tooltip-row.primary.metric-messages { color: #7bc468; }
+.heatmap-tooltip-row.primary.metric-edits { color: #c98f5a; }
 .heatmap-tooltip-row.primary strong { font-size: 13px; }
 .day-detail { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 18px; }
 .day-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -387,6 +402,55 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
         </div>
       </div>
 
+      <!-- AI Session Activity -->
+      <div v-if="dash.devin_activity && (dash.devin_activity.projects.length || dash.devin_activity.titles.length)" class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="title">AI Session Activity (Today)</span></div>
+        <!-- Message distribution -->
+        <div v-if="dash.devin_activity.msg_dist && Object.keys(dash.devin_activity.msg_dist).length" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+          <span v-for="(cnt, role) in dash.devin_activity.msg_dist" :key="role" class="tool-chip" style="font-size:12px;padding:3px 10px">
+            {{ role }} <span class="tool-chip-count">{{ cnt }}</span>
+          </span>
+        </div>
+        <!-- Tool activity chips -->
+        <div v-if="dash.devin_activity.tool_kinds && Object.keys(dash.devin_activity.tool_kinds).length" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+          <span v-for="(cnt, kind) in dash.devin_activity.tool_kinds" :key="kind" class="tool-chip">
+            {{ kind }}<span class="tool-chip-count">{{ cnt }}</span>
+          </span>
+        </div>
+        <!-- Project breakdown -->
+        <div v-if="dash.devin_activity.projects && dash.devin_activity.projects.length" class="table-wrap" style="margin-bottom:12px">
+          <table>
+            <thead><tr><th>Project</th><th class="text-right">Sessions</th><th class="text-right">Messages</th><th class="text-right">Duration</th></tr></thead>
+            <tbody><tr v-for="p in dash.devin_activity.projects" :key="p.project">
+              <td>{{ p.project }}</td>
+              <td class="text-right">{{ p.sessions }}</td>
+              <td class="text-right text-dim">{{ p.messages }}</td>
+              <td class="text-right text-dim">{{ formatDurationSeconds(p.duration) }}</td>
+            </tr></tbody>
+          </table>
+        </div>
+        <!-- Agent mode + Backend type -->
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+          <div v-if="dash.devin_activity.agent_modes && Object.keys(dash.devin_activity.agent_modes).length" class="tool-group">
+            <span class="tool-group-label">Mode</span>
+            <span v-for="(cnt, mode) in dash.devin_activity.agent_modes" :key="mode" class="tool-chip">{{ mode }}<span class="tool-chip-count">{{ cnt }}</span></span>
+          </div>
+          <div v-if="dash.devin_activity.backend_types && Object.keys(dash.devin_activity.backend_types).length" class="tool-group">
+            <span class="tool-group-label">Backend</span>
+            <span v-for="(cnt, bt) in dash.devin_activity.backend_types" :key="bt" class="tool-chip">{{ bt }}<span class="tool-chip-count">{{ cnt }}</span></span>
+          </div>
+        </div>
+        <!-- Session titles -->
+        <div v-if="dash.devin_activity.titles && dash.devin_activity.titles.length">
+          <div class="day-detail-section-title">Today's Tasks</div>
+          <div v-for="(t, i) in dash.devin_activity.titles" :key="i" style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
+            <span class="text-dim" style="font-size:11px;width:40px">{{ formatDurationSeconds(t.duration) }}</span>
+            <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
+            <span>{{ t.title }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Indie/Work split bar -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-header"><span class="title">Indie / Work Split</span></div>
@@ -538,6 +602,9 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
             <option value="work">Work</option>
             <option value="total">Total</option>
             <option value="tokens">Tokens</option>
+            <option value="sessions">Sessions</option>
+            <option value="messages">Messages</option>
+            <option value="edits">Edits</option>
           </select>
         </div>
         <div class="heatmap-summary">
@@ -575,7 +642,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
         </div>
         <div v-if="heatmapTooltip.visible" class="heatmap-tooltip" :style="{left: heatmapTooltip.x + 'px', top: heatmapTooltip.y + 'px'}">
           <div v-for="row in heatmapTooltipRows(heatmapTooltip.cell)" :key="row.metric" class="heatmap-tooltip-row" :class="[{primary: row.primary}, 'metric-' + row.metric]">
-            <span>{{ row.label }}</span><strong v-if="row.isTokens">{{ formatTokens(row.seconds) }}</strong><strong v-else>{{ formatDurationSeconds(row.seconds) }}</strong>
+            <span>{{ row.label }}</span><strong v-if="row.isCount">{{ row.isTokens ? formatTokens(row.seconds) : row.seconds }}</strong><strong v-else>{{ formatDurationSeconds(row.seconds) }}</strong>
           </div>
         </div>
 
@@ -629,6 +696,51 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
                   <td class="text-right text-dim">{{ s.cached }}</td>
                 </tr></tbody>
               </table>
+            </div>
+          </div>
+          <!-- Devin session activity -->
+          <div v-if="dayDetail.devin_activity && (dayDetail.devin_activity.projects.length || dayDetail.devin_activity.titles.length)" style="margin-bottom:16px;padding:12px 14px;border:1px solid var(--border-light);border-radius:8px">
+            <!-- Message distribution -->
+            <div v-if="dayDetail.devin_activity.msg_dist && Object.keys(dayDetail.devin_activity.msg_dist).length" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+              <span v-for="(cnt, role) in dayDetail.devin_activity.msg_dist" :key="role" class="tool-chip" style="font-size:12px;padding:3px 10px">
+                {{ role }} <span class="tool-chip-count">{{ cnt }}</span>
+              </span>
+            </div>
+            <!-- Tool activity chips -->
+            <div v-if="dayDetail.devin_activity.tool_kinds && Object.keys(dayDetail.devin_activity.tool_kinds).length" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">
+              <span v-for="(cnt, kind) in dayDetail.devin_activity.tool_kinds" :key="kind" class="tool-chip">{{ kind }}<span class="tool-chip-count">{{ cnt }}</span></span>
+            </div>
+            <!-- Project breakdown -->
+            <div v-if="dayDetail.devin_activity.projects && dayDetail.devin_activity.projects.length" class="table-wrap" style="margin-bottom:10px">
+              <table>
+                <thead><tr><th>Project</th><th class="text-right">Sessions</th><th class="text-right">Messages</th><th class="text-right">Duration</th></tr></thead>
+                <tbody><tr v-for="p in dayDetail.devin_activity.projects" :key="p.project">
+                  <td>{{ p.project }}</td>
+                  <td class="text-right">{{ p.sessions }}</td>
+                  <td class="text-right text-dim">{{ p.messages }}</td>
+                  <td class="text-right text-dim">{{ formatDurationSeconds(p.duration) }}</td>
+                </tr></tbody>
+              </table>
+            </div>
+            <!-- Agent mode + Backend type -->
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
+              <div v-if="dayDetail.devin_activity.agent_modes && Object.keys(dayDetail.devin_activity.agent_modes).length" class="tool-group">
+                <span class="tool-group-label">Mode</span>
+                <span v-for="(cnt, mode) in dayDetail.devin_activity.agent_modes" :key="mode" class="tool-chip">{{ mode }}<span class="tool-chip-count">{{ cnt }}</span></span>
+              </div>
+              <div v-if="dayDetail.devin_activity.backend_types && Object.keys(dayDetail.devin_activity.backend_types).length" class="tool-group">
+                <span class="tool-group-label">Backend</span>
+                <span v-for="(cnt, bt) in dayDetail.devin_activity.backend_types" :key="bt" class="tool-chip">{{ bt }}<span class="tool-chip-count">{{ cnt }}</span></span>
+              </div>
+            </div>
+            <!-- Session titles -->
+            <div v-if="dayDetail.devin_activity.titles && dayDetail.devin_activity.titles.length">
+              <div class="day-detail-section-title">Tasks</div>
+              <div v-for="(t, i) in dayDetail.devin_activity.titles" :key="i" style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:13px">
+                <span class="text-dim" style="font-size:11px;width:40px">{{ formatDurationSeconds(t.duration) }}</span>
+                <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
+                <span>{{ t.title }}</span>
+              </div>
             </div>
           </div>
           <div class="day-detail-columns">
@@ -903,7 +1015,7 @@ createApp({
       { id: 'settings', label: 'Settings', icon: ICONS.settings },
     ];
 
-    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, indie_focus: '0s', work: '0s', work_pct: 0, work_focus: '0s', current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s', ai_tokens: { total_tokens: 0, total_display: '0', input_display: '0', output_display: '0', cached_display: '0', sessions: 0, messages: 0, by_source: [], mcp_groups: [], skill_items: [], skill_total: 0, other_tools: [] } });
+    const dash = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, indie_focus: '0s', work: '0s', work_pct: 0, work_focus: '0s', current: '--', current_fg: '', current_windows: [], current_codex: [] }, pie: [], app_breakdown: [], tag_distribution: [], timeline: [], indie_details: [], codex_table: [], codex_active_count: 0, idle_time: '0s', ai_tokens: { total_tokens: 0, total_display: '0', input_display: '0', output_display: '0', cached_display: '0', sessions: 0, messages: 0, by_source: [], mcp_groups: [], skill_items: [], skill_total: 0, other_tools: [] }, devin_activity: { projects: [], tool_kinds: {}, agent_modes: {}, backend_types: {}, msg_dist: {}, titles: [] } });
     const hist = reactive({ cards: { total: '0s', indie: '0s', indie_pct: 0, work: '0s', work_pct: 0, avg: '0s' }, trend: [], per_app: [], tag_trend: [], period_summary: [] });
     const heatmap = reactive({ start: '', end: '', days: [], days_with_data: 0, total_seconds: 0, work_seconds: 0, indie_seconds: 0, total_tokens: 0 });
     const heatmapMetric = ref('indie');
@@ -911,7 +1023,7 @@ createApp({
     const heatmapScroll = ref(null);
     const heatmapLoading = ref(false);
     const historyDetailsLoading = ref(false);
-    const dayDetail = reactive({ date: '', total: '0s', idle: '0s', tags: [], apps: [], timeline: [], ai_tokens: null, mcp_groups: [], skill_items: [], skill_total: 0 });
+    const dayDetail = reactive({ date: '', total: '0s', idle: '0s', tags: [], apps: [], timeline: [], ai_tokens: null, mcp_groups: [], skill_items: [], skill_total: 0, devin_activity: null });
     const eff = reactive({ focus_sessions: [], switch_frequency: [], peak_hours: [], idle_time: '0s', idle_seconds: 0 });
     const events = ref([]);
     const eventFilter = ref('all');
@@ -1040,6 +1152,9 @@ createApp({
       if (heatmapMetric.value === 'work') return cell.work_seconds || 0;
       if (heatmapMetric.value === 'total') return cell.total_seconds || 0;
       if (heatmapMetric.value === 'tokens') return cell.tokens || 0;
+      if (heatmapMetric.value === 'sessions') return cell.sessions || 0;
+      if (heatmapMetric.value === 'messages') return cell.messages || 0;
+      if (heatmapMetric.value === 'edits') return cell.edits || 0;
       return cell.indie_seconds || 0;
     }
 
@@ -1097,13 +1212,17 @@ createApp({
 
     function heatmapTooltipRows(cell) {
       if (!cell || !cell.date) return [];
-      const labels = { indie: 'Indie', total: 'Total', work: 'Work', tokens: 'Tokens' };
+      const labels = { indie: 'Indie', total: 'Total', work: 'Work', tokens: 'Tokens', sessions: 'Sessions', messages: 'Messages', edits: 'Edits' };
       const seconds = {
         indie: cell.indie_seconds || 0,
         total: cell.total_seconds || 0,
         work: cell.work_seconds || 0,
         tokens: cell.tokens || 0,
+        sessions: cell.sessions || 0,
+        messages: cell.messages || 0,
+        edits: cell.edits || 0,
       };
+      const isCount = ['tokens', 'sessions', 'messages', 'edits'].includes(heatmapMetric.value);
       const order = [heatmapMetric.value, 'total', 'indie', 'work'].filter((metric, index, all) => all.indexOf(metric) === index);
       const rows = order.slice(0, 3).map(metric => ({
         metric,
@@ -1111,10 +1230,11 @@ createApp({
         seconds: seconds[metric],
         primary: metric === heatmapMetric.value,
         isTokens: metric === 'tokens',
+        isCount: ['tokens', 'sessions', 'messages', 'edits'].includes(metric),
       }));
       // Always append token info if available
       if (cell.tokens && cell.tokens > 0 && !rows.some(row => row.metric === 'tokens')) {
-        rows.push({ metric: 'tokens', label: 'Tokens', seconds: cell.tokens, primary: heatmapMetric.value === 'tokens', isTokens: true });
+        rows.push({ metric: 'tokens', label: 'Tokens', seconds: cell.tokens, primary: heatmapMetric.value === 'tokens', isTokens: true, isCount: true });
       }
       return rows;
     }
@@ -1161,6 +1281,7 @@ createApp({
       dayDetail.mcp_groups = [];
       dayDetail.skill_items = [];
       dayDetail.skill_total = 0;
+      dayDetail.devin_activity = null;
     }
 
     function dayTimelineHours() {

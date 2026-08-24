@@ -15,7 +15,7 @@ from flask import Flask, jsonify, send_file, request, Response
 from werkzeug.serving import make_server
 
 from config import AppConfig, DB_FILE
-from tracker.ai_token_reader import get_today_tokens, format_tokens, read_all_daily_tokens, read_daily_tool_calls, read_today_tool_calls
+from tracker.ai_token_reader import get_today_tokens, format_tokens, read_all_daily_tokens, read_daily_tool_calls, read_today_tool_calls, read_daily_devin_activity
 from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.time_recorder import TimeRecorder
@@ -59,7 +59,7 @@ def _summarize_cached_tokens(day_data: Dict) -> Dict:
         total_messages += msgs
         by_source.append({
             "source": source,
-            "tokens": inp + out,
+            "tokens": inp + out + cached,
             "input": inp,
             "output": out,
             "cached": cached,
@@ -68,7 +68,7 @@ def _summarize_cached_tokens(day_data: Dict) -> Dict:
         })
     by_source.sort(key=lambda x: -x["tokens"])
     return {
-        "total_tokens": total_input + total_output,
+        "total_tokens": total_input + total_output + total_cached,
         "input_tokens": total_input,
         "output_tokens": total_output,
         "cached_tokens": total_cached,
@@ -391,6 +391,13 @@ class WebServer:
                 ai_tokens["skill_total"] = tc.get("skill", sum(skill_detail.values()))
                 # Other tools not shown in UI
                 ai_tokens["other_tools"] = []
+
+                # Devin session activity (projects, tool kinds, titles, etc.)
+                try:
+                    devin_activity = read_daily_devin_activity(date.today().isoformat())
+                except Exception as e:
+                    logger.warning("Failed to read devin activity: %s", e)
+                    devin_activity = {"projects": [], "tool_kinds": {}, "agent_modes": {}, "backend_types": {}, "msg_dist": {}, "titles": []}
             except Exception as e:
                 logger.warning("Failed to read AI tokens: %s", e)
                 ai_tokens = {
@@ -400,6 +407,7 @@ class WebServer:
                     "output_display": "0", "cached_display": "0", "by_source": [],
                     "tool_calls": {}, "mcp_groups": [], "skill_items": [], "skill_total": 0, "other_tools": [],
                 }
+                devin_activity = {"projects": [], "tool_kinds": {}, "agent_modes": {}, "backend_types": {}, "msg_dist": {}, "titles": []}
 
             return jsonify({
                 "cards": {
@@ -423,6 +431,7 @@ class WebServer:
                 "codex_active_count": 1 if codex_current_active else 0,
                 "idle_time": _fmt_duration(self._recorder.get_today_idle_time()),
                 "ai_tokens": ai_tokens,
+                "devin_activity": devin_activity,
             })
 
         # ---- API: History ----
@@ -607,8 +616,31 @@ class WebServer:
             for d_iso, sources in cached_tokens.items():
                 day_total = 0
                 for entry in sources.values():
-                    day_total += entry.get("input", 0) + entry.get("output", 0)
+                    day_total += entry.get("input", 0) + entry.get("output", 0) + entry.get("cached", 0)
                 daily_token_totals[d_iso] = day_total
+
+            # Build per-day devin activity metrics (sessions, messages, edits)
+            daily_sessions = {}
+            daily_messages = {}
+            daily_edits = {}
+            # From cache
+            cached_activity = self._recorder.get_cached_devin_activity_dates()
+            for d_iso in cached_activity:
+                act = self._recorder.get_devin_activity_daily(d_iso)
+                if act:
+                    daily_sessions[d_iso] = sum(p.get("sessions", 0) for p in act.get("projects", []))
+                    daily_messages[d_iso] = sum(p.get("messages", 0) for p in act.get("projects", []))
+                    daily_edits[d_iso] = act.get("tool_kinds", {}).get("edit", 0)
+            # Live for today
+            try:
+                today_iso = date.today().isoformat()
+                live_act = read_daily_devin_activity(today_iso)
+                if live_act:
+                    daily_sessions[today_iso] = sum(p.get("sessions", 0) for p in live_act.get("projects", []))
+                    daily_messages[today_iso] = sum(p.get("messages", 0) for p in live_act.get("projects", []))
+                    daily_edits[today_iso] = live_act.get("tool_kinds", {}).get("edit", 0)
+            except Exception as e:
+                logger.warning("Failed to read live devin activity for heatmap: %s", e)
 
             # Pad to whole Monday-Sunday weeks so the frontend can render a
             # GitHub-style grid without special cases at either edge.
@@ -631,6 +663,9 @@ class WebServer:
                         1,
                     ),
                     "tokens": daily_token_totals.get(iso, 0) if in_range else 0,
+                    "sessions": daily_sessions.get(iso, 0) if in_range else 0,
+                    "messages": daily_messages.get(iso, 0) if in_range else 0,
+                    "edits": daily_edits.get(iso, 0) if in_range else 0,
                 })
                 cursor += timedelta(days=1)
 
@@ -739,6 +774,16 @@ class WebServer:
             except Exception as e:
                 logger.warning("Failed to read tool calls for %s: %s", selected_iso, e)
 
+            # Devin session activity
+            devin_activity = None
+            try:
+                if selected_iso == today_iso:
+                    devin_activity = read_daily_devin_activity(selected_iso)
+                else:
+                    devin_activity = self._recorder.get_devin_activity_daily(selected_iso)
+            except Exception as e:
+                logger.warning("Failed to read devin activity for %s: %s", selected_iso, e)
+
             return jsonify({
                 "date": selected_iso,
                 "total_seconds": round(total_seconds, 1),
@@ -752,6 +797,7 @@ class WebServer:
                 "mcp_groups": tool_groups,
                 "skill_items": skill_items,
                 "skill_total": skill_total,
+                "devin_activity": devin_activity,
             })
 
         # ---- API: Events ----

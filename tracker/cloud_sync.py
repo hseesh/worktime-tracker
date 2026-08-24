@@ -108,12 +108,13 @@ class CloudSync:
     # ------------------------------------------------------------------ #
 
     def _push(self):
-        """Upload this device's time_records, tag_time_records, ai_token_daily and tool_call_daily (date <= today)."""
+        """Upload this device's time_records, tag_time_records, ai_token_daily, tool_call_daily and devin_activity_daily (date <= today)."""
         today = date.today().isoformat()
         self._push_tag_time_records(today)
         self._push_time_records(today)
         self._push_ai_token_daily(today)
         self._push_tool_call_daily(today)
+        self._push_devin_activity_daily(today)
 
     def _push_tag_time_records(self, include_date: str):
         rows = self._recorder.get_local_tag_time_records_for_sync(include_date)
@@ -199,6 +200,24 @@ class CloudSync:
         self._upsert_cloud("tool_call_daily_cloud", payload)
         logger.info("Pushed %d tool_call_daily rows.", len(payload))
 
+    def _push_devin_activity_daily(self, include_date: str):
+        rows = self._recorder.get_local_devin_activity_for_sync(include_date)
+        if not rows:
+            logger.info("No devin_activity_daily rows to push.")
+            return
+
+        payload = [
+            {
+                "device_id": r["device_id"],
+                "date": r["date"],
+                "data_json": r["data_json"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+        self._upsert_cloud("devin_activity_daily_cloud", payload)
+        logger.info("Pushed %d devin_activity_daily rows.", len(payload))
+
     def _upsert_cloud(self, table: str, payload: List[Dict]):
         """Upsert rows to a Supabase table via REST API.
 
@@ -217,6 +236,8 @@ class CloudSync:
             on_conflict = "device_id,date,source"
         elif table == "tool_call_daily_cloud":
             on_conflict = "device_id,date,category,name"
+        elif table == "devin_activity_daily_cloud":
+            on_conflict = "device_id,date"
         else:
             raise ValueError(f"Unknown table: {table}")
 
@@ -241,6 +262,7 @@ class CloudSync:
         self._pull_time_records(today)
         self._pull_ai_token_daily(today)
         self._pull_tool_call_daily(today)
+        self._pull_devin_activity_daily(today)
 
     def _pull_tag_time_records(self, include_date: str):
         rows = self._fetch_cloud(
@@ -301,6 +323,21 @@ class CloudSync:
             row["updated_at"] = _strip_tz(row.get("updated_at", ""))
             self._recorder.upsert_cloud_tool_call_daily(row)
         logger.info("Pulled and merged %d tool_call_daily rows.", len(rows))
+
+    def _pull_devin_activity_daily(self, include_date: str):
+        rows = self._fetch_cloud(
+            "devin_activity_daily_cloud",
+            select="device_id,date,data_json,updated_at",
+            lte_date=include_date,
+        )
+        if not rows:
+            logger.info("No devin_activity_daily rows to pull.")
+            return
+
+        for row in rows:
+            row["updated_at"] = _strip_tz(row.get("updated_at", ""))
+            self._recorder.upsert_cloud_devin_activity_daily(row)
+        logger.info("Pulled and merged %d devin_activity_daily rows.", len(rows))
 
     def _fetch_cloud(self, table: str, select: str, lte_date: str) -> List[Dict]:
         """Fetch rows from a Supabase table where date <= lte_date.

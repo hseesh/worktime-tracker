@@ -76,9 +76,10 @@ def main():
         try:
             recorder.sync_ai_token_cache(days=400)
             recorder.sync_tool_call_cache(days=400)
-            logger.info("AI token + tool call cache sync complete.")
+            recorder.sync_devin_activity_cache(days=400)
+            logger.info("AI token + tool call + devin activity cache sync complete.")
         except Exception as e:
-            logger.warning("AI token/tool call cache sync failed: %s", e)
+            logger.warning("AI token/tool call/activity cache sync failed: %s", e)
 
     ai_sync_thread = threading.Thread(target=_sync_ai_tokens, name="ai-token-sync", daemon=True)
     ai_sync_thread.start()
@@ -99,12 +100,20 @@ def main():
         ).start()
 
         def _periodic_sync_loop():
-            """Refresh today's caches then force cloud sync every 30 min."""
+            """Refresh today's caches then force cloud sync every 30 min.
+            Skips when user is idle (no keyboard/mouse for 10 min) to avoid
+            unnecessary work during inactivity — but still syncs if you're
+            coding at 3am."""
+            from tracker.idle_detector import get_idle_seconds
             while True:
                 threading.Event().wait(timeout=1800)
                 try:
+                    if get_idle_seconds() > 600:
+                        logger.debug("User idle, skipping periodic sync.")
+                        continue
                     recorder.refresh_today_ai_token_cache()
                     recorder.refresh_today_tool_call_cache()
+                    recorder.refresh_today_devin_activity_cache()
                     cloud_sync.run_if_needed(force=True)
                     logger.info("Periodic cloud sync complete.")
                 except Exception as e:
@@ -132,8 +141,14 @@ def main():
                 yesterday = (date.today() - timedelta(days=1)).isoformat()
                 recorder.refresh_ai_token_cache_for_date(yesterday)
                 recorder.refresh_tool_call_cache_for_date(yesterday)
+                # Refresh yesterday's devin activity from live source
+                from tracker.ai_token_reader import read_daily_devin_activity
+                yt_activity = read_daily_devin_activity(yesterday)
+                recorder.upsert_devin_activity_daily(yesterday, __import__('json').dumps(yt_activity))
                 if cloud_sync.enabled:
                     cloud_sync.run_if_needed(force=True)
+                # Clean up old time_segments (keep 30 days)
+                recorder.cleanup_old_time_segments(keep_days=30)
                 logger.info("Yesterday cache refresh complete for %s.", yesterday)
             except Exception as e:
                 logger.warning("Yesterday cache refresh failed: %s", e)

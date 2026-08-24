@@ -1,6 +1,7 @@
 """Core timing logic: accumulate per-process foreground seconds and persist to SQLite."""
 
 import csv
+import json
 import logging
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -144,6 +145,14 @@ CREATE TABLE IF NOT EXISTS tool_call_daily (
 );
 """
 
+_CREATE_DEVIN_ACTIVITY_SQL = """
+CREATE TABLE IF NOT EXISTS devin_activity_daily (
+    date           TEXT    NOT NULL PRIMARY KEY,
+    data_json      TEXT    NOT NULL DEFAULT '{}',
+    updated_at     TEXT    NOT NULL
+);
+"""
+
 _CREATE_CACHE_SCAN_SQL = """
 CREATE TABLE IF NOT EXISTS cache_scan_state (
     device_id     TEXT NOT NULL DEFAULT '',
@@ -179,6 +188,7 @@ class TimeRecorder:
             conn.execute(_CREATE_TAG_TOTALS_SQL)
             conn.execute(_CREATE_AI_TOKEN_SQL)
             conn.execute(_CREATE_TOOL_CALL_SQL)
+            conn.execute(_CREATE_DEVIN_ACTIVITY_SQL)
             conn.execute(_CREATE_CACHE_SCAN_SQL)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_time_segments_date_tag "
@@ -1441,6 +1451,113 @@ class TimeRecorder:
             conn.commit()
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  Devin activity daily cache (projects, tool kinds, titles, etc.)   #
+    # ------------------------------------------------------------------ #
+
+    def upsert_devin_activity_daily(self, d_iso: str, data_json: str):
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO devin_activity_daily (date, data_json, updated_at) "
+                "VALUES (?, ?, ?)",
+                (d_iso, data_json, datetime.now().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_devin_activity_daily(self, d_iso: str) -> Optional[Dict]:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT data_json FROM devin_activity_daily WHERE date = ?",
+                (d_iso,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or not row["data_json"]:
+            return None
+        try:
+            return json.loads(row["data_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def get_cached_devin_activity_dates(self) -> set:
+        conn = self._conn()
+        try:
+            rows = conn.execute("SELECT DISTINCT date FROM devin_activity_daily").fetchall()
+        finally:
+            conn.close()
+        return {r["date"] for r in rows}
+
+    def sync_devin_activity_cache(self, days: int = 400):
+        """Scan Devin sessions.db and populate devin_activity_daily for uncached dates."""
+        from tracker.ai_token_reader import read_daily_devin_activity
+        cached_dates = self.get_cached_devin_activity_dates()
+        end = date.today()
+        start = end - timedelta(days=days - 1)
+        cursor = start
+        while cursor <= end:
+            d_iso = cursor.isoformat()
+            if d_iso not in cached_dates:
+                data = read_daily_devin_activity(d_iso)
+                if data.get("projects") or data.get("titles") or data.get("msg_dist"):
+                    self.upsert_devin_activity_daily(d_iso, json.dumps(data))
+            cursor += timedelta(days=1)
+
+    def refresh_today_devin_activity_cache(self):
+        """Refresh today's devin activity cache from live source data."""
+        from tracker.ai_token_reader import read_daily_devin_activity
+        today = date.today().isoformat()
+        data = read_daily_devin_activity(today)
+        self.upsert_devin_activity_daily(today, json.dumps(data))
+
+    def get_local_devin_activity_for_sync(self, include_date: str) -> List[Dict]:
+        """Return this device's devin_activity_daily rows for dates <= include_date."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT date, data_json, updated_at FROM devin_activity_daily WHERE date <= ?",
+                (include_date,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r, device_id=self._device_id) for r in rows]
+
+    def upsert_cloud_devin_activity_daily(self, row: Dict):
+        if row.get("device_id") == self._device_id and row.get("date") == date.today().isoformat():
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO devin_activity_daily (date, data_json, updated_at) "
+                "VALUES (?, ?, ?)",
+                (row["date"], row["data_json"], row.get("updated_at", "")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def cleanup_old_time_segments(self, keep_days: int = 30) -> int:
+        """Delete time_segments older than keep_days. Returns deleted row count."""
+        cutoff = (date.today() - timedelta(days=keep_days)).isoformat()
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "DELETE FROM time_segments WHERE date < ?", (cutoff,)
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            # Reclaim disk space
+            conn.execute("VACUUM")
+            conn.commit()
+        finally:
+            conn.close()
+        if deleted > 0:
+            logger.info("Cleaned up %d time_segments rows older than %s", deleted, cutoff)
+        return deleted
 
     def get_codex_today_summary(self) -> List[Dict]:
         """Return [{project_name, project, seconds}] for today, sorted desc."""

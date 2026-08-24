@@ -132,3 +132,27 @@ CREATE INDEX IF NOT EXISTS idx_ai_token_cloud_device_date
 
 CREATE INDEX IF NOT EXISTS idx_tool_call_cloud_device_date
     ON tool_call_daily_cloud (device_id, date);
+
+-- ============================================================
+-- Table 5: devin_activity_daily_cloud
+-- Per-device daily Devin session activity (projects, tool kinds, titles, etc.)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS devin_activity_daily_cloud (
+    id          BIGSERIAL PRIMARY KEY,
+    device_id   TEXT NOT NULL,
+    date        DATE NOT NULL,
+    data_json   JSONB NOT NULL DEFAULT '{}',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(device_id, date)
+);
+
+ALTER TABLE devin_activity_daily_cloud ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "anon full access devin_activity_daily_cloud"
+    ON devin_activity_daily_cloud
+    FOR ALL TO anon
+    USING (true)
+    WITH CHECK (true);
+
+CREATE INDEX IF NOT EXISTS idx_devin_activity_cloud_device_date
+    ON devin_activity_daily_cloud (device_id, date);

@@ -590,7 +590,7 @@ def _summarize_day(day_data: Dict) -> Dict:
         total_messages += msgs
         by_source.append({
             "source": source,
-            "tokens": inp + out,
+            "tokens": inp + out + cached,
             "input": inp,
             "output": out,
             "cached": cached,
@@ -599,7 +599,7 @@ def _summarize_day(day_data: Dict) -> Dict:
         })
     by_source.sort(key=lambda x: -x["tokens"])
     return {
-        "total_tokens": total_input + total_output,
+        "total_tokens": total_input + total_output + total_cached,
         "input_tokens": total_input,
         "output_tokens": total_output,
         "cached_tokens": total_cached,
@@ -616,3 +616,280 @@ def format_tokens(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}K"
     return str(n)
+
+
+def read_daily_devin_activity(target_date: str) -> Dict:
+    """Read Devin session activity for a specific date.
+
+    Returns:
+        {
+            "projects": [{"project": str, "sessions": int, "messages": int, "duration": int(seconds)}],
+            "tool_kinds": {"edit": int, "execute": int, "read": int, "search": int, "fetch": int},
+            "agent_modes": {"bypass": int, "accept-edits": int},
+            "backend_types": {"windsurf": int, "cli": int},
+            "msg_dist": {"user": int, "assistant": int, "tool": int, "system": int},
+            "titles": [{"title": str, "duration": int(seconds), "project": str}],
+        }
+    """
+    from collections import Counter, defaultdict
+
+    result = {
+        "projects": [],
+        "tool_kinds": {},
+        "agent_modes": {},
+        "backend_types": {},
+        "msg_dist": {},
+        "titles": [],
+    }
+    if not _DEVIN_DB.exists():
+        return result
+
+    try:
+        con = sqlite3.connect(f"file:{_DEVIN_DB}?mode=ro", uri=True)
+        cur = con.cursor()
+        d = date.fromisoformat(target_date)
+        start_ts = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+        end_ts = start_ts + 86400
+
+        sessions = cur.execute(
+            "SELECT id, working_directory, model, agent_mode, backend_type, "
+            "created_at, last_activity_at, title "
+            "FROM sessions WHERE created_at >= ? AND created_at < ?",
+            (start_ts, end_ts),
+        ).fetchall()
+
+        if not sessions:
+            con.close()
+            return result
+
+        # Per-project aggregation
+        proj_data: Dict[str, Dict] = defaultdict(lambda: {"sessions": 0, "messages": 0, "duration": 0})
+        agent_modes: Counter = Counter()
+        backend_types: Counter = Counter()
+        titles = []
+        session_ids = []
+
+        for sid, wd, model, agent_mode, backend_type, created, last_activity, title in sessions:
+            session_ids.append(sid)
+            duration = max(0, int(last_activity - created))
+            # Normalize project path to last 2 path components
+            proj = _normalize_project_path(wd)
+            proj_data[proj]["sessions"] += 1
+            proj_data[proj]["duration"] += duration
+            if agent_mode:
+                agent_modes[agent_mode] += 1
+            if backend_type:
+                backend_types[backend_type] += 1
+            if title and title.strip():
+                titles.append({"title": title.strip(), "duration": duration, "project": proj})
+
+        # Message distribution (batch query)
+        msg_dist: Counter = Counter()
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            rows = cur.execute(
+                f"SELECT json_extract(chat_message, '$.role') as role, COUNT(*) "
+                f"FROM message_nodes WHERE session_id IN ({placeholders}) "
+                f"GROUP BY role",
+                session_ids,
+            ).fetchall()
+            for role, cnt in rows:
+                if role:
+                    msg_dist[role] = cnt
+            # Add message counts to projects
+            for sid, wd, *_ in sessions:
+                proj = _normalize_project_path(wd)
+                cnt = cur.execute(
+                    "SELECT COUNT(*) FROM message_nodes WHERE session_id = ?",
+                    (sid,),
+                ).fetchone()[0]
+                proj_data[proj]["messages"] += cnt
+
+        # Tool call kinds (batch query)
+        tool_kinds: Counter = Counter()
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            rows = cur.execute(
+                f"SELECT json_extract(tool_call_json, '$.kind') as kind, COUNT(*) "
+                f"FROM tool_call_state WHERE session_id IN ({placeholders}) "
+                f"GROUP BY kind",
+                session_ids,
+            ).fetchall()
+            for kind, cnt in rows:
+                if kind:
+                    tool_kinds[kind] = cnt
+
+        con.close()
+
+        # Build result from Devin data
+        projects = []
+        for proj, d in proj_data.items():
+            projects.append({
+                "project": proj,
+                "sessions": d["sessions"],
+                "messages": d["messages"],
+                "duration": d["duration"],
+            })
+        projects.sort(key=lambda x: -x["duration"])
+
+        titles.sort(key=lambda x: -x["duration"])
+        titles = titles[:10]
+
+        result["projects"] = projects
+        result["tool_kinds"] = dict(tool_kinds)
+        result["agent_modes"] = dict(agent_modes)
+        result["backend_types"] = dict(backend_types)
+        result["msg_dist"] = dict(msg_dist)
+        result["titles"] = titles
+
+    except sqlite3.Error as e:
+        logger.warning("Failed to read Devin activity for %s: %s", target_date, e)
+
+    # --- Codex: scan JSONL files for the date ---
+    from collections import Counter, defaultdict
+    codex_msg_dist: Counter = Counter()
+    codex_tool_kinds: Counter = Counter()
+    codex_backend_types: Counter = Counter()
+    codex_projects: Dict[str, Dict] = defaultdict(lambda: {"sessions": 0, "messages": 0, "duration": 0})
+    codex_titles = []
+
+    for d_dir in (_CODEX_SESSIONS_DIR, _CODEX_ARCHIVED_DIR):
+        if not d_dir.exists():
+            continue
+        for filepath in d_dir.rglob("*.jsonl"):
+            if _codex_file_date(filepath) != target_date:
+                continue
+            try:
+                cwd = None
+                model = "codex"
+                source = None
+                first_ts = None
+                last_ts = None
+                user_msgs = 0
+                agent_msgs = 0
+                agent_reasoning = 0
+                patches = 0
+                tool_calls = 0
+                tasks_complete = 0
+                title = None
+
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        t = obj.get("type", "")
+                        if t == "session_meta":
+                            payload = obj.get("payload") or {}
+                            cwd = payload.get("cwd")
+                            source = payload.get("source", "")
+                            provenance = (payload.get("base_instructions") or {}).get("provenance") or {}
+                            model = provenance.get("model") or "codex"
+                            ts_str = payload.get("timestamp", "")
+                            if ts_str:
+                                try:
+                                    first_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                                except (ValueError, TypeError):
+                                    pass
+                        elif t == "event_msg":
+                            payload = obj.get("payload") or {}
+                            et = payload.get("type", "")
+                            # started_at is a unix timestamp (int)
+                            sa = payload.get("started_at")
+                            if sa and isinstance(sa, (int, float)):
+                                last_ts = float(sa)
+                            if et == "user_message":
+                                user_msgs += 1
+                                if not title:
+                                    msg = payload.get("message", "")
+                                    if isinstance(msg, str):
+                                        # Clean up: remove markdown, newlines, extra spaces
+                                        import re
+                                        clean = re.sub(r'[#*`\[\]\(\)\\]', '', msg)
+                                        clean = re.sub(r'\s+', ' ', clean).strip()
+                                        title = clean[:80] if clean else None
+                            elif et == "agent_message":
+                                agent_msgs += 1
+                            elif et == "agent_reasoning":
+                                agent_reasoning += 1
+                            elif et == "patch_apply_end":
+                                patches += 1
+                            elif et == "task_complete":
+                                tasks_complete += 1
+                        elif t == "response_item":
+                            payload = obj.get("payload") or {}
+                            rt = payload.get("type", "")
+                            if rt == "custom_tool_call":
+                                tool_calls += 1
+
+                if first_ts and last_ts:
+                    duration = int(last_ts - first_ts)
+                else:
+                    duration = 0
+
+                proj = _normalize_project_path(cwd) if cwd else "codex"
+                codex_projects[proj]["sessions"] += 1
+                codex_projects[proj]["messages"] += user_msgs + agent_msgs
+                codex_projects[proj]["duration"] += duration
+
+                codex_msg_dist["user"] += user_msgs
+                codex_msg_dist["assistant"] += agent_msgs
+                codex_msg_dist["reasoning"] += agent_reasoning
+                codex_tool_kinds["edit"] += patches
+                codex_tool_kinds["execute"] += tool_calls
+                codex_tool_kinds["task_complete"] += tasks_complete
+                if source:
+                    codex_backend_types[f"codex-{source}"] += 1
+                if title:
+                    codex_titles.append({"title": title, "duration": duration, "project": proj})
+
+            except OSError:
+                pass
+
+    # Merge Codex into result
+    if codex_projects:
+        existing_projs = {p["project"] for p in result["projects"]}
+        for proj, d in codex_projects.items():
+            if proj in existing_projs:
+                for p in result["projects"]:
+                    if p["project"] == proj:
+                        p["sessions"] += d["sessions"]
+                        p["messages"] += d["messages"]
+                        p["duration"] += d["duration"]
+                        break
+            else:
+                result["projects"].append({
+                    "project": proj,
+                    "sessions": d["sessions"],
+                    "messages": d["messages"],
+                    "duration": d["duration"],
+                })
+        result["projects"].sort(key=lambda x: -x["duration"])
+
+    for k, v in codex_msg_dist.items():
+        result["msg_dist"][k] = result["msg_dist"].get(k, 0) + v
+    for k, v in codex_tool_kinds.items():
+        result["tool_kinds"][k] = result["tool_kinds"].get(k, 0) + v
+    for k, v in codex_backend_types.items():
+        result["backend_types"][k] = result["backend_types"].get(k, 0) + v
+
+    if codex_titles:
+        result["titles"].extend(codex_titles)
+        result["titles"].sort(key=lambda x: -x["duration"])
+        result["titles"] = result["titles"][:10]
+
+    return result
+
+
+def _normalize_project_path(wd: str) -> str:
+    """Normalize a working directory to a short project name."""
+    if not wd:
+        return "(unknown)"
+    parts = wd.replace("\\", "/").rstrip("/").split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return parts[-1] if parts else wd
