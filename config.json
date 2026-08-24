@@ -1,0 +1,358 @@
+{
+  "processes": {
+    "Devin.exe": "Devin",
+    "idea64.exe": "IntelliJ IDEA",
+    "idea.exe": "IntelliJ IDEA",
+    "ChatGPT.exe": "Codex",
+    "Unity.exe": "Unity Editor",
+    "Weixin.exe": "WeChat",
+    "WeChat.exe": "WeChat",
+    "WeChatAppEx.exe": "WeChat",
+    "msedge.exe": "Edge",
+    "chrome.exe": "Chrome",
+    "codex.exe": "Codex",
+    "codex-code-mode-host.exe": "Codex",
+    "rider64.exe": "Rider",
+    "cockpit-tools.exe": "cockpit-tools.exe",
+    "uTools.exe": "uTools.exe",
+    "Doubao.exe": "Doubao.exe",
+    "Unity Hub.exe": "Unity Hub.exe",
+    "cloudmusic.exe": "cloudmusic.exe",
+    "navicat.exe": "navicat.exe",
+    "explorer.exe": "Other (explorer.exe)",
+    "et.exe": "Other (et.exe)",
+    "Cockpit Tools-1.3.14-installer.exe": "Other (Cockpit Tools-1.3.14-installer.exe)",
+    "wps.exe": "Other (wps.exe)",
+    "哔哩哔哩.exe": "Other (哔哩哔哩.exe)",
+    "Qoder.exe": "Other (Qoder.exe)"
+  },
+  "idle_threshold": 300,
+  "poll_interval": 1000,
+  "auto_start_minimized": true,
+  "auto_start_with_windows": true,
+  "indie_keywords": {
+    "ChatGPT.exe": [
+      "Assets",
+      "P1-c",
+      "unity"
+    ],
+    "codex.exe": [
+      "Assets",
+      "P1-c",
+      "unity"
+    ],
+    "codex-code-mode-host.exe": [
+      "Assets",
+      "P1-c",
+      "unity"
+    ],
+    "Unity.exe": [
+      "unity"
+    ],
+    "rider64.exe": [
+      "Assets",
+      "P1-c",
+      "unity"
+    ],
+    "chrome.exe": [
+      "Unity 资源商店",
+      "Unity Asset Store",
+      "FreeModel"
+    ],
+    "Devin.exe": [
+      "Assets",
+      "P1-c",
+      "unity"
+    ]
+  },
+  "work_keywords": {
+    "chrome.exe": [
+      "教务系统",
+      "zs-cloud",
+      "Jenkins",
+      "任务调度中心",
+      "咨询师系统",
+      "ChatGPT",
+      "Pull Requests",
+      "ZsCloudAdmin",
+      "Windsurf",
+      "Nacos",
+      "Devin"
+    ]
+  },
+  "process_tags": {
+    "Devin.exe": "Work",
+    "ChatGPT.exe": "Work",
+    "codex.exe": "Work",
+    "codex-code-mode-host.exe": "Work",
+    "Unity.exe": "Work",
+    "rider64.exe": "Indie",
+    "Weixin.exe": "Work",
+    "WeChat.exe": "Work",
+    "WeChatAppEx.exe": "Work",
+    "idea.exe": "Work",
+    "idea64.exe": "Work",
+    "cockpit-tools.exe": "Work",
+    "uTools.exe": "Work",
+    "Doubao.exe": "Work",
+    "Unity Hub.exe": "Indie",
+    "cloudmusic.exe": "Fun",
+    "navicat.exe": "Work",
+    "explorer.exe": "Work",
+    "msedge.exe": "Work",
+    "et.exe": "Work",
+    "Cockpit Tools-1.3.14-installer.exe": "Work",
+    "chrome.exe": "Work"
+  },
+  "tag_keyword_rules": {
+    "ChatGPT.exe": [
+      {
+        "keyword": "Assets",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "P1-c",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "unity",
+        "tag": "Indie"
+      }
+    ],
+    "codex.exe": [
+      {
+        "keyword": "Assets",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "P1-c",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "unity",
+        "tag": "Indie"
+      }
+    ],
+    "codex-code-mode-host.exe": [
+      {
+        "keyword": "Assets",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "P1-c",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "unity",
+        "tag": "Indie"
+      }
+    ],
+    "Unity.exe": [
+      {
+        "keyword": "unity",
+        "tag": "Indie"
+      }
+    ],
+    "rider64.exe": [
+      {
+        "keyword": "Assets",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "P1-c",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "unity",
+        "tag": "Indie"
+      }
+    ],
+    "chrome.exe": [
+      {
+        "keyword": "Unity 资源商店",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Unity Asset Store",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "FreeModel",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "教务系统",
+        "tag": "Work"
+      },
+      {
+        "keyword": "zs-cloud",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Jenkins",
+        "tag": "Work"
+      },
+      {
+        "keyword": "任务调度中心",
+        "tag": "Work"
+      },
+      {
+        "keyword": "咨询师系统",
+        "tag": "Work"
+      },
+      {
+        "keyword": "ChatGPT",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Pull Requests",
+        "tag": "Work"
+      },
+      {
+        "keyword": "ZsCloudAdmin",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Windsurf",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Nacos",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Devin",
+        "tag": "Work"
+      }
+    ],
+    "Devin.exe": [
+      {
+        "keyword": "Assets",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "P1-c",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "unity",
+        "tag": "Indie"
+      }
+    ],
+    "msedge.exe": [
+      {
+        "keyword": "ChatGPT",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Unity 资源商店",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Unity Asset Store",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Google Gemini",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Flowus",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "P1",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Procedural UI",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "Icon Cropper",
+        "tag": "Indie"
+      },
+      {
+        "keyword": "教务系统",
+        "tag": "Work"
+      },
+      {
+        "keyword": "CRM",
+        "tag": "Work"
+      },
+      {
+        "keyword": "任务调度中心",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Gitee",
+        "tag": "Work"
+      },
+      {
+        "keyword": "Pull Requests",
+        "tag": "Work"
+      }
+    ]
+  },
+  "app_tag_overrides": {
+    "cockpit-tools.exe": {
+      "display:cockpit-tools.exe": "Indie"
+    },
+    "wps.exe": {
+      "display:other (wps.exe)": "Work"
+    },
+    "哔哩哔哩.exe": {
+      "display:other (哔哩哔哩.exe)": "Fun"
+    },
+    "qoder.exe": {
+      "display:other (qoder.exe)": "Indie"
+    }
+  },
+  "url_tag_rules": {
+    "chrome.exe": [
+      {
+        "domain": "chatgpt.com",
+        "tag": "Indie"
+      },
+      {
+        "domain": "claude.ai",
+        "tag": "Indie"
+      },
+      {
+        "domain": "gemini.google.com",
+        "tag": "Indie"
+      },
+      {
+        "domain": "itch.io",
+        "tag": "Indie"
+      },
+      {
+        "domain": "unity.com",
+        "tag": "Indie"
+      },
+      {
+        "domain": "assetstore.unity.com",
+        "tag": "Indie"
+      },
+      {
+        "domain": "flowus.cn",
+        "tag": "Indie"
+      },
+      {
+        "domain": "gitee.com",
+        "tag": "Work"
+      },
+      {
+        "domain": "github.com",
+        "tag": "Work"
+      }
+    ]
+  },
+  "supabase": {
+    "url": "https://hqlqqthkiulmozgxbnxx.supabase.co",
+    "anon_key": "sb_publishable_V3VfpbZEjZUbvQ4DYilXWQ_x02ikkUs",
+    "enabled": true
+  },
+  "device_id": "6a0f049d-c856-4e77-947a-bd132717a1fe",
+  "last_sync_date": "2026-08-24"
+}
