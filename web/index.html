@@ -444,9 +444,9 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
         <div v-if="dash.devin_activity.titles && dash.devin_activity.titles.length">
           <div class="day-detail-section-title">Today's Tasks</div>
           <div v-for="(t, i) in dash.devin_activity.titles" :key="i" style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
-            <span class="text-dim" style="font-size:11px;width:40px">{{ formatDurationSeconds(t.duration) }}</span>
-            <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
-            <span>{{ t.title }}</span>
+            <span class="text-dim" style="font-size:11px;width:40px;flex-shrink:0">{{ formatDurationSeconds(t.duration) }}</span>
+            <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.title">{{ t.title }}</span>
           </div>
         </div>
       </div>
@@ -737,9 +737,9 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
             <div v-if="dayDetail.devin_activity.titles && dayDetail.devin_activity.titles.length">
               <div class="day-detail-section-title">Tasks</div>
               <div v-for="(t, i) in dayDetail.devin_activity.titles" :key="i" style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:13px">
-                <span class="text-dim" style="font-size:11px;width:40px">{{ formatDurationSeconds(t.duration) }}</span>
-                <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
-                <span>{{ t.title }}</span>
+                <span class="text-dim" style="font-size:11px;width:40px;flex-shrink:0">{{ formatDurationSeconds(t.duration) }}</span>
+                <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.title">{{ t.title }}</span>
               </div>
             </div>
           </div>
@@ -1057,6 +1057,19 @@ createApp({
       const { cards, ...details } = d;
       Object.assign(dash, details);
       nextTick(() => { updatePieChart(); updateTimelineChart(); });
+    }
+
+    let aiDashboardLoading = false;
+    async function loadAIDashboard() {
+      if (aiDashboardLoading) return;
+      aiDashboardLoading = true;
+      try {
+        const d = await api('/api/dashboard/ai');
+        if (d.ai_tokens) Object.assign(dash.ai_tokens, d.ai_tokens);
+        if (d.devin_activity) dash.devin_activity = d.devin_activity;
+      } finally {
+        aiDashboardLoading = false;
+      }
     }
 
     let liveDashboardLoading = false;
@@ -1586,22 +1599,25 @@ createApp({
       }, true);
     }
 
-    let dashTimer, liveDashTimer, eventTimer;
+    let dashTimer, liveDashTimer, eventTimer, aiDashTimer;
 
     onMounted(() => {
       loadDashboard();
+      loadAIDashboard();
       loadLiveDashboard();
       loadHistory();
       loadEvents();
       loadSettings();
       loadEfficiency();
       dashTimer = setInterval(loadDashboard, 5000);
+      aiDashTimer = setInterval(loadAIDashboard, 30000);
       liveDashTimer = setInterval(loadLiveDashboard, 500);
       eventTimer = setInterval(loadEvents, 3000);
     });
 
     onUnmounted(() => {
       clearInterval(dashTimer);
+      clearInterval(aiDashTimer);
       clearInterval(liveDashTimer);
       clearInterval(eventTimer);
       [pieInstance, trendInstance, timelineInstance, tagTrendInstance, periodInstance, peakHoursInstance, switchFreqInstance].forEach(i => { if (i) i.dispose(); });
@@ -1611,6 +1627,15 @@ createApp({
       if (tab === 'dashboard') nextTick(() => { updatePieChart(); updateTimelineChart(); if (pieInstance) pieInstance.resize(); if (timelineInstance) timelineInstance.resize(); });
       if (tab === 'history') { loadHistory(); nextTick(() => { if (trendInstance) trendInstance.resize(); if (tagTrendInstance) tagTrendInstance.resize(); if (periodInstance) periodInstance.resize(); }); }
       if (tab === 'efficiency') { loadEfficiency(); nextTick(() => { if (peakHoursInstance) peakHoursInstance.resize(); if (switchFreqInstance) switchFreqInstance.resize(); }); }
+    });
+
+    // Refresh data immediately when tab becomes visible again
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        loadDashboard();
+        loadAIDashboard();
+        loadLiveDashboard();
+      }
     });
 
     return {

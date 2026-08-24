@@ -74,7 +74,7 @@ DEFAULT_URL_TAG_RULES: Dict[str, List[Dict]] = {
     ],
 }
 
-CONFIG_DIR = Path.home() / ".worktime-tracker"
+CONFIG_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DB_FILE = CONFIG_DIR / "worktime.db"
 

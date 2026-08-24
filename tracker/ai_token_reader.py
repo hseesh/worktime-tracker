@@ -694,13 +694,14 @@ def read_daily_devin_activity(target_date: str) -> Dict:
                 session_ids,
             ).fetchall()
             for role, cnt in rows:
-                if role:
+                if role and role != "system":
                     msg_dist[role] = cnt
-            # Add message counts to projects
+            # Add message counts to projects (user messages only)
             for sid, wd, *_ in sessions:
                 proj = _normalize_project_path(wd)
                 cnt = cur.execute(
-                    "SELECT COUNT(*) FROM message_nodes WHERE session_id = ?",
+                    "SELECT COUNT(*) FROM message_nodes WHERE session_id = ? "
+                    "AND json_extract(chat_message, '$.role') = 'user'",
                     (sid,),
                 ).fetchone()[0]
                 proj_data[proj]["messages"] += cnt
@@ -811,7 +812,7 @@ def read_daily_devin_activity(target_date: str) -> Dict:
                                         import re
                                         clean = re.sub(r'[#*`\[\]\(\)\\]', '', msg)
                                         clean = re.sub(r'\s+', ' ', clean).strip()
-                                        title = clean[:80] if clean else None
+                                        title = clean[:60] if clean else None
                             elif et == "agent_message":
                                 agent_msgs += 1
                             elif et == "agent_reasoning":
@@ -833,7 +834,7 @@ def read_daily_devin_activity(target_date: str) -> Dict:
 
                 proj = _normalize_project_path(cwd) if cwd else "codex"
                 codex_projects[proj]["sessions"] += 1
-                codex_projects[proj]["messages"] += user_msgs + agent_msgs
+                codex_projects[proj]["messages"] += user_msgs
                 codex_projects[proj]["duration"] += duration
 
                 codex_msg_dist["user"] += user_msgs

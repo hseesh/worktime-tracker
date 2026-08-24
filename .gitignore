@@ -4,6 +4,11 @@ __pycache__/
 *.pyo
 data/
 *.db
+*.db-shm
+*.db-wal
+
+# Local config with sensitive keys
+config.json
 
 # Debug / utility scripts (not part of the app)
 check_db.py

@@ -1,29 +1,12 @@
-feat: AI session activity tracking with Devin + Codex integration
+perf: split dashboard API and move config to project dir
 
-Add devin_activity_daily cache to track per-day AI session metrics:
-- Project distribution (sessions, messages, duration)
-- Tool activity (edit, execute, read, search, fetch, task_complete)
-- Message distribution (user, assistant, tool, system, reasoning)
-- Agent mode and backend type breakdown
-- Session titles (top 10 by duration)
-
-Data sources:
-- Devin: sessions.db (working_directory, message_nodes, tool_call_state)
-- Codex: JSONL files (session_meta.cwd, event_msg, response_item)
-
-UI additions:
-- Dashboard: AI Session Activity card with projects, tools, tasks
-- History day detail: same activity block for historical dates
-- Heatmap: new Sessions/Messages/Edits metric toggles
-
-Cloud sync:
-- New devin_activity_daily_cloud table in Supabase
-- Push/pull logic mirroring ai_token_daily sync
-- Activity-based sync schedule (skip when user idle >10min)
-
-Maintenance:
-- Auto-cleanup time_segments older than 30 days at midnight
-- VACUUM after cleanup to reclaim disk space
+- Split /api/dashboard into fast (344ms) + /api/dashboard/ai (505ms)
+- Frontend polls dashboard 5s, AI data 30s, parallel on first load
+- Add visibilitychange listener to refresh on tab focus
+- Move config.json + worktime.db from ~/.worktime-tracker to project dir
+- Exclude system messages from message counts (only count user msgs)
+- Truncate long Codex session titles, ellipsis overflow in UI
+- Add config.json to .gitignore (contains anon_key)
 
 Generated with [Devin](https://devin.ai)
 

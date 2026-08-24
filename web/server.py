@@ -213,6 +213,7 @@ class WebServer:
 
             # Pie chart from time_segments only (codex time already included)
             seg_apps = self._recorder.get_today_app_breakdown()
+
             merged = {}
             for r in seg_apps:
                 merged[r["display_name"]] = merged.get(r["display_name"], 0) + r["seconds"]
@@ -353,6 +354,32 @@ class WebServer:
                 parts.append("Codex: " + ", ".join(current_codex))
             current = " + ".join(parts) if parts else ""
 
+            return jsonify({
+                "cards": {
+                    "total": _fmt_duration(total),
+                    "indie": _fmt_duration(total_indie),
+                    "indie_pct": round((total_indie / total * 100) if total > 0 else 0, 0),
+                    "work": _fmt_duration(total_work),
+                    "work_pct": round((total_work / total * 100) if total > 0 else 0, 0),
+                    "current": current or "--",
+                    "current_fg": current_fg,
+                    "current_fg_tag": current_fg_tag,
+                    "current_windows": current_windows,
+                    "current_codex": current_codex,
+                },
+                "pie": pie_data,
+                "app_breakdown": app_breakdown,
+                "tag_distribution": tag_dist,
+                "timeline": timeline,
+                "indie_details": indie_rows,
+                "codex_table": codex_table,
+                "codex_active_count": 1 if codex_current_active else 0,
+                "idle_time": _fmt_duration(self._recorder.get_today_idle_time()),
+            })
+
+        # ---- API: Dashboard AI (tokens + activity, slower, polled less) ----
+        @app.route("/api/dashboard/ai")
+        def api_dashboard_ai():
             # AI token usage (live read from Devin sessions.db + Codex JSONL)
             try:
                 ai_tokens = get_today_tokens()
@@ -389,15 +416,7 @@ class WebServer:
                     skill_items.append({"name": name, "count": cnt})
                 ai_tokens["skill_items"] = skill_items
                 ai_tokens["skill_total"] = tc.get("skill", sum(skill_detail.values()))
-                # Other tools not shown in UI
                 ai_tokens["other_tools"] = []
-
-                # Devin session activity (projects, tool kinds, titles, etc.)
-                try:
-                    devin_activity = read_daily_devin_activity(date.today().isoformat())
-                except Exception as e:
-                    logger.warning("Failed to read devin activity: %s", e)
-                    devin_activity = {"projects": [], "tool_kinds": {}, "agent_modes": {}, "backend_types": {}, "msg_dist": {}, "titles": []}
             except Exception as e:
                 logger.warning("Failed to read AI tokens: %s", e)
                 ai_tokens = {
@@ -407,29 +426,21 @@ class WebServer:
                     "output_display": "0", "cached_display": "0", "by_source": [],
                     "tool_calls": {}, "mcp_groups": [], "skill_items": [], "skill_total": 0, "other_tools": [],
                 }
+
+            # Devin session activity — use cache, fall back to live
+            try:
+                today_iso = date.today().isoformat()
+                devin_activity = self._recorder.get_devin_activity_daily(today_iso)
+                if not devin_activity or not devin_activity.get("projects"):
+                    devin_activity = read_daily_devin_activity(today_iso)
+                    self._recorder.upsert_devin_activity_daily(
+                        today_iso, __import__("json").dumps(devin_activity)
+                    )
+            except Exception as e:
+                logger.warning("Failed to read devin activity: %s", e)
                 devin_activity = {"projects": [], "tool_kinds": {}, "agent_modes": {}, "backend_types": {}, "msg_dist": {}, "titles": []}
 
             return jsonify({
-                "cards": {
-                    "total": _fmt_duration(total),
-                    "indie": _fmt_duration(total_indie),
-                    "indie_pct": round((total_indie / total * 100) if total > 0 else 0, 0),
-                    "work": _fmt_duration(total_work),
-                    "work_pct": round((total_work / total * 100) if total > 0 else 0, 0),
-                    "current": current or "--",
-                    "current_fg": current_fg,
-                    "current_fg_tag": current_fg_tag,
-                    "current_windows": current_windows,
-                    "current_codex": current_codex,
-                },
-                "pie": pie_data,
-                "app_breakdown": app_breakdown,
-                "tag_distribution": tag_dist,
-                "timeline": timeline,
-                "indie_details": indie_rows,
-                "codex_table": codex_table,
-                "codex_active_count": 1 if codex_current_active else 0,
-                "idle_time": _fmt_duration(self._recorder.get_today_idle_time()),
                 "ai_tokens": ai_tokens,
                 "devin_activity": devin_activity,
             })
