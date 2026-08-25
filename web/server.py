@@ -43,7 +43,12 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _summarize_cached_tokens(day_data: Dict) -> Dict:
-    """Convert cached {source: {input, output, cached, sessions, messages}} to dashboard format."""
+    """Convert cached {source: {input, output, cached, sessions, messages}} to dashboard format.
+
+    Handles mixed conventions: Codex (OpenAI API) stores input_tokens that INCLUDES
+    cached_tokens, while Devin stores them separately. Heuristic: if cached <= input,
+    cached is likely a subset of input (old Codex data before normalization).
+    """
     total_input = total_output = total_cached = total_sessions = total_messages = 0
     by_source = []
     for source, entry in day_data.items():
@@ -52,6 +57,9 @@ def _summarize_cached_tokens(day_data: Dict) -> Dict:
         cached = entry.get("cached", 0)
         sess = entry.get("sessions", 0)
         msgs = entry.get("messages", 0)
+        # If cached <= input, treat cached as subset of input (old Codex convention).
+        if cached <= inp and cached > 0:
+            inp = inp - cached  # Normalize: input = new tokens only
         total_input += inp
         total_output += out
         total_cached += cached
@@ -180,6 +188,14 @@ class WebServer:
             response = send_file(str(INDEX_FILE), max_age=0)
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             response.headers["Pragma"] = "no-cache"
+            return response
+
+        # ---- Serve mobile.html ----
+        @app.route("/mobile")
+        def mobile():
+            mobile_file = WEB_DIR / "mobile.html"
+            response = send_file(str(mobile_file), max_age=0)
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             return response
 
         # ---- API: App Icon ----
@@ -627,7 +643,14 @@ class WebServer:
             for d_iso, sources in cached_tokens.items():
                 day_total = 0
                 for entry in sources.values():
-                    day_total += entry.get("input", 0) + entry.get("output", 0) + entry.get("cached", 0)
+                    inp = entry.get("input", 0)
+                    out = entry.get("output", 0)
+                    cac = entry.get("cached", 0)
+                    # If cached <= input, cached is subset of input (old Codex convention)
+                    if cac <= inp and cac > 0:
+                        day_total += inp + out  # cached already in input
+                    else:
+                        day_total += inp + out + cac
                 daily_token_totals[d_iso] = day_total
 
             # Build per-day devin activity metrics (sessions, messages, edits)

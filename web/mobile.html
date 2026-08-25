@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>WorkTime</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --card-hover: #1c2331;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --text-muted: #6e7681;
+  --green: #3fb950;
+  --blue: #58a6ff;
+  --red: #f85149;
+  --yellow: #d29922;
+  --purple: #bc8cff;
+  --cyan: #39d0d8;
+  --orange: #f0883e;
+  --pink: #f778ba;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.app { max-width: 520px; margin: 0 auto; padding: 0 16px 60px; }
+
+/* Header */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(13,17,23,0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  margin: 0 -16px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.header-left { display: flex; align-items: center; gap: 10px; }
+.header h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+.header-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+.header-actions { display: flex; gap: 8px; align-items: center; }
+.date-input {
+  background: var(--card); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 5px 8px; font-size: 13px; width: 130px;
+}
+.btn-refresh {
+  background: var(--card); border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 8px; width: 34px; height: 34px; font-size: 16px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-refresh:active { transform: scale(0.9); background: var(--border); }
+.btn-refresh.spinning { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Cards */
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 14px; padding: 16px; margin-top: 12px;
+}
+.card-title {
+  font-size: 12px; color: var(--text-muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px;
+  display: flex; align-items: center; gap: 6px;
+}
+
+/* Time stats */
+.time-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border-radius: 10px; overflow: hidden; }
+.time-stat { background: var(--card); padding: 14px 8px; text-align: center; }
+.time-stat .val { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
+.time-stat .lbl { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.time-stat.total .val { color: var(--yellow); }
+.time-stat.indie .val { color: var(--green); }
+.time-stat.work .val { color: var(--blue); }
+
+/* Tag bar */
+.tag-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin: 12px 0 8px; gap: 1px; }
+.tag-bar > div { border-radius: 1px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-item { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; }
+.tag-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+/* AI section */
+.ai-hero { text-align: center; padding: 8px 0 12px; }
+.ai-hero .tokens { font-size: 32px; font-weight: 800; color: var(--purple); letter-spacing: -1px; }
+.ai-hero .sub { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+.ai-breakdown { display: flex; justify-content: space-around; padding: 10px 0; border-top: 1px solid var(--border); margin-top: 8px; }
+.ai-breakdown-item { text-align: center; }
+.ai-breakdown-item .v { font-size: 15px; font-weight: 700; }
+.ai-breakdown-item .l { font-size: 10px; color: var(--text-muted); }
+.ai-breakdown-item.in .v { color: var(--cyan); }
+.ai-breakdown-item.out .v { color: var(--orange); }
+.ai-breakdown-item.cached .v { color: var(--text-dim); }
+
+/* Source list */
+.source-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; }
+.source-row + .source-row { border-top: 1px solid var(--border); }
+.source-name { font-size: 13px; font-weight: 500; }
+.source-tokens { font-size: 13px; color: var(--purple); font-weight: 600; }
+
+/* Tool chips */
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  font-size: 12px; padding: 4px 10px; border-radius: 8px;
+  background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.2);
+  color: var(--text-dim);
+}
+.chip .n { color: var(--cyan); font-weight: 700; margin-left: 4px; }
+.chip.mcp { background: rgba(188,140,255,0.1); border-color: rgba(188,140,255,0.2); }
+.chip.mcp .n { color: var(--purple); }
+.chip.skill { background: rgba(63,185,80,0.1); border-color: rgba(63,185,80,0.2); }
+.chip.skill .n { color: var(--green); }
+
+/* Project / Task rows */
+.row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+.row + .row { border-top: 1px solid var(--border); }
+.row-left { flex: 1; min-width: 0; }
+.row-name { font-size: 14px; font-weight: 500; }
+.row-meta { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.row-right { font-size: 14px; font-weight: 700; flex-shrink: 0; margin-left: 12px; }
+
+/* Task rows */
+.task { display: flex; gap: 8px; padding: 7px 0; }
+.task + .task { border-top: 1px solid var(--border); }
+.task-dur { font-size: 11px; color: var(--text-muted); width: 36px; flex-shrink: 0; text-align: right; }
+.task-proj { font-size: 10px; color: var(--text-muted); width: 70px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-title { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Heatmap */
+.heatmap { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+.heatmap-row { display: flex; gap: 4px; }
+.hm-cell {
+  width: 16px; height: 16px; border-radius: 3px; background: #21262d;
+  cursor: pointer; transition: transform 0.1s;
+}
+.hm-cell:active { transform: scale(1.25); }
+.hm-cell.l1 { background: #1f3d2e; }
+.hm-cell.l2 { background: #2f6b4e; }
+.hm-cell.l3 { background: #4fae7d; }
+.hm-cell.l4 { background: #7fe0a8; }
+.hm-cell.selected { outline: 2px solid var(--blue); outline-offset: 1px; }
+.hm-legend { display: flex; align-items: center; gap: 4px; justify-content: flex-end; font-size: 10px; color: var(--text-muted); margin-top: 10px; }
+.hm-legend .hm-cell { width: 12px; height: 12px; cursor: default; }
+
+/* Trend */
+.trend { display: flex; align-items: flex-end; gap: 6px; margin-top: 10px; }
+.trend-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.trend-plot { height: 90px; width: 100%; display: flex; align-items: flex-end; justify-content: center; }
+.trend-bar { width: 70%; border-radius: 4px; min-height: 3px; transition: height 0.3s; }
+.trend-bar.today { background: linear-gradient(180deg, #79b8ff, var(--blue)); }
+.trend-bar.normal { background: linear-gradient(180deg, #5dd28a, var(--green)); }
+.trend-bar.zero { background: var(--border); }
+.trend-label { font-size: 10px; color: var(--text-muted); }
+.trend-val { font-size: 10px; color: var(--text-dim); min-height: 12px; }
+
+/* Empty / loading / error */
+.empty { text-align: center; color: var(--text-muted); padding: 16px; font-size: 13px; }
+.loading-screen { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+.error-screen { text-align: center; padding: 40px 20px; color: var(--red); font-size: 14px; }
+.skeleton { background: linear-gradient(90deg, var(--card) 25%, var(--card-hover) 50%, var(--card) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 14px; height: 80px; margin-top: 12px; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="app">
+    <div class="header">
+      <div class="header-left">
+        <div class="header-dot"></div>
+        <h1>WorkTime</h1>
+      </div>
+      <div class="header-actions">
+        <input type="date" v-model="selectedDate" class="date-input" @change="loadAll" :max="todayStr">
+        <button class="btn-refresh" :class="{spinning: loading}" @click="loadAll">↻</button>
+      </div>
+    </div>
+
+    <div v-if="loading && !data" class="loading-screen">
+      <div style="font-size:28px;margin-bottom:8px">⏳</div>
+      <div>加载中…</div>
+    </div>
+    <div v-else-if="error" class="error-screen">
+      <div style="font-size:28px;margin-bottom:8px">⚠️</div>
+      <div>{{ error }}</div>
+    </div>
+    <template v-else-if="data">
+
+      <!-- Time Overview -->
+      <div class="card">
+        <div class="card-title">⏱ 时长概览</div>
+        <div class="time-stats">
+          <div class="time-stat total">
+            <div class="val">{{ fmtDur(data.totalSeconds) }}</div>
+            <div class="lbl">Total</div>
+          </div>
+          <div class="time-stat indie">
+            <div class="val">{{ fmtDur(data.indieSeconds) }}</div>
+            <div class="lbl">Indie</div>
+          </div>
+          <div class="time-stat work">
+            <div class="val">{{ fmtDur(data.workSeconds) }}</div>
+            <div class="lbl">Work</div>
+          </div>
+        </div>
+        <div class="tag-bar" v-if="data.totalSeconds > 0">
+          <div v-for="t in data.tags" :key="t.tag"
+               :style="{width: (t.seconds/data.totalSeconds*100)+'%', background: tagColor(t.tag)}"></div>
+        </div>
+        <div class="tag-list">
+          <span v-for="t in data.tags" :key="t.tag" class="tag-item">
+            <span class="tag-dot" :style="{background: tagColor(t.tag)}"></span>
+            {{ t.tag }} {{ fmtDur(t.seconds) }}
+          </span>
+        </div>
+      </div>
+
+      <!-- AI Token Usage -->
+      <div class="card" v-if="data.ai.total > 0">
+        <div class="card-title">🤖 AI Token Usage</div>
+        <div class="ai-hero">
+          <div class="tokens">{{ fmtTokens(data.ai.total) }}</div>
+          <div class="sub">{{ data.ai.sessions }} sessions · {{ data.ai.messages }} messages</div>
+        </div>
+        <div class="ai-breakdown">
+          <div class="ai-breakdown-item in">
+            <div class="v">{{ fmtTokens(data.ai.input) }}</div>
+            <div class="l">Input</div>
+          </div>
+          <div class="ai-breakdown-item out">
+            <div class="v">{{ fmtTokens(data.ai.output) }}</div>
+            <div class="l">Output</div>
+          </div>
+          <div class="ai-breakdown-item cached">
+            <div class="v">{{ fmtTokens(data.ai.cached) }}</div>
+            <div class="l">Cached</div>
+          </div>
+        </div>
+        <div v-for="s in data.ai.sources" :key="s.source" class="source-row">
+          <span class="source-name">{{ s.source }}</span>
+          <span class="source-tokens">{{ fmtTokens(s.tokens) }} · {{ s.sessions }}s</span>
+        </div>
+      </div>
+
+      <!-- MCP & Skill Tools -->
+      <div class="card" v-if="data.ai.tools.length">
+        <div class="card-title">🔧 MCP & Skill</div>
+        <div class="chips">
+          <span v-for="t in data.ai.tools" :key="t.name"
+                class="chip" :class="t.category">
+            {{ t.shortName }}<span class="n">{{ t.count }}</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- Session Activity: Projects -->
+      <div class="card" v-if="data.activity && data.activity.projects && data.activity.projects.length">
+        <div class="card-title">📂 项目分布</div>
+        <div v-for="p in data.activity.projects" :key="p.project" class="row">
+          <div class="row-left">
+            <div class="row-name">{{ p.project }}</div>
+            <div class="row-meta">{{ p.sessions }} sessions · {{ p.messages }} msgs</div>
+          </div>
+          <div class="row-right">{{ fmtDur(p.duration) }}</div>
+        </div>
+      </div>
+
+      <!-- Tool Activity -->
+      <div class="card" v-if="data.activity && data.activity.tool_kinds && Object.keys(data.activity.tool_kinds).length">
+        <div class="card-title">⚡ 工具活动</div>
+        <div class="chips">
+          <span v-for="(cnt, kind) in data.activity.tool_kinds" :key="kind" class="chip">
+            {{ kind }}<span class="n">{{ cnt }}</span>
+          </span>
+        </div>
+        <div style="margin-top:10px" v-if="data.activity.msg_dist && Object.keys(data.activity.msg_dist).length">
+          <div class="chips">
+            <span v-for="(cnt, role) in data.activity.msg_dist" :key="role" class="chip">
+              {{ role }}<span class="n">{{ cnt }}</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Today's Tasks -->
+      <div class="card" v-if="data.activity && data.activity.titles && data.activity.titles.length">
+        <div class="card-title">� 任务列表</div>
+        <div v-for="(t, i) in data.activity.titles" :key="i" class="task">
+          <span class="task-dur">{{ fmtDur(t.duration) }}</span>
+          <span class="task-proj" :title="t.project">{{ t.project }}</span>
+          <span class="task-title" :title="t.title">{{ t.title }}</span>
+        </div>
+      </div>
+
+      <!-- App Breakdown -->
+      <div class="card" v-if="data.apps.length">
+        <div class="card-title">📱 应用分布</div>
+        <div v-for="a in data.apps.slice(0, 8)" :key="a.name + a.tag" class="row">
+          <div class="row-left">
+            <div class="row-name">{{ a.name }}</div>
+            <div class="row-meta">{{ a.tag }} · {{ a.pct }}%</div>
+          </div>
+          <div class="row-right">{{ fmtDur(a.seconds) }}</div>
+        </div>
+      </div>
+
+      <!-- 30-day Heatmap -->
+      <div class="card">
+        <div class="card-title">🔥 30天活动</div>
+        <div class="heatmap">
+          <div v-for="(week, wi) in heatmapWeeks" :key="wi" class="heatmap-row">
+            <div v-for="cell in week" :key="cell.key"
+                 class="hm-cell"
+                 :class="[heatmapLevel(cell), {selected: cell.date === selectedDate}]"
+                 @click="cell.date && selectDate(cell.date)">
+            </div>
+          </div>
+        </div>
+        <div class="hm-legend">
+          <span>少</span>
+          <div class="hm-cell l1"></div>
+          <div class="hm-cell l2"></div>
+          <div class="hm-cell l3"></div>
+          <div class="hm-cell l4"></div>
+          <span>多</span>
+        </div>
+      </div>
+
+      <!-- 7-day Trend -->
+      <div class="card">
+        <div class="card-title">📈 7天趋势</div>
+        <div class="trend">
+          <div v-for="d in trend7" :key="d.date" class="trend-col">
+            <div class="trend-val">{{ d.seconds > 0 ? fmtDur(d.seconds) : '' }}</div>
+            <div class="trend-plot">
+              <div class="trend-bar"
+                   :class="d.seconds === 0 ? 'zero' : (d.isToday ? 'today' : 'normal')"
+                   :style="{height: (d.seconds / trendMax * 90) + 'px'}">
+              </div>
+            </div>
+            <div class="trend-label">{{ d.label }}</div>
+          </div>
+        </div>
+      </div>
+
+    </template>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script>
+const SUPABASE_URL = 'https://hqlqqthkiulmozgxbnxx.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_V3VfpbZEjZUbvQ4DYilXWQ_x02ikkUs';
+const DEVICE_ID = '6a0f049d-c856-4e77-947a-bd132717a1fe';
+
+async function sbFetch(table, params) {
+  let url = SUPABASE_URL + '/rest/v1/' + table + '?';
+  const q = [];
+  if (params.select) q.push('select=' + params.select);
+  if (params.eq) q.push(params.eq[0] + '=eq.' + encodeURIComponent(params.eq[1]));
+  if (params.lte) q.push(params.lte[0] + '=lte.' + encodeURIComponent(params.lte[1]));
+  if (params.gte) q.push(params.gte[0] + '=gte.' + encodeURIComponent(params.gte[1]));
+  if (params.order) q.push('order=' + params.order);
+  if (params.limit) q.push('limit=' + params.limit);
+  url += q.join('&');
+
+  const res = await fetch(url, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': 'Bearer ' + SUPABASE_KEY,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(table + ': HTTP ' + res.status + ' ' + body.substring(0, 100));
+  }
+  return res.json();
+}
+
+function fmtDur(seconds) {
+  if (!seconds || seconds < 1) return '0m';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return h + 'h' + (m > 0 ? ' ' + m + 'm' : '');
+  return m + 'm';
+}
+
+function fmtTokens(n) {
+  if (!n) return '0';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K';
+  return String(n);
+}
+
+function localDateStr(d) {
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
+var TAG_COLORS = {
+  Work: '#58a6ff', Indie: '#3fb950', Fun: '#d29922',
+  Other: '#6e7681', Idle: '#30363d',
+};
+
+var app = Vue.createApp({
+  setup: function() {
+    var loading = Vue.ref(false);
+    var error = Vue.ref('');
+    var data = Vue.ref(null);
+    var today = new Date();
+    var todayStr = localDateStr(today);
+    var selectedDate = Vue.ref(todayStr);
+    var heatmapData = Vue.ref([]);
+    var trend7 = Vue.ref([]);
+
+    var heatmapWeeks = Vue.computed(function() {
+      if (!heatmapData.value.length) return [];
+      var data = heatmapData.value.slice();
+      while (data.length % 7 !== 0) {
+        data.push({ key: 'hm-pad-' + data.length, date: null, seconds: 0 });
+      }
+      var weeks = [];
+      for (var i = 0; i < data.length; i += 7) {
+        weeks.push(data.slice(i, i + 7));
+      }
+      return weeks;
+    });
+
+    var trendMax = Vue.computed(function() {
+      return Math.max.apply(null, trend7.value.map(function(d) { return d.seconds; }).concat([1]));
+    });
+
+    function tagColor(tag) {
+      return TAG_COLORS[tag] || '#bc8cff';
+    }
+
+    function heatmapLevel(cell) {
+      if (!cell || !cell.date) return '';
+      var s = cell.seconds || 0;
+      if (s === 0) return '';
+      if (s < 7200) return 'l1';
+      if (s < 21600) return 'l2';
+      if (s < 36000) return 'l3';
+      return 'l4';
+    }
+
+    function selectDate(d) {
+      selectedDate.value = d;
+      loadAll();
+    }
+
+    function loadAll() {
+      loading.value = true;
+      error.value = '';
+      Promise.all([loadDay(), loadHeatmap(), loadTrend()])
+        .catch(function(e) { error.value = e.message; })
+        .finally(function() { loading.value = false; });
+    }
+
+    async function loadDay() {
+      var d = selectedDate.value;
+      var results = await Promise.all([
+        sbFetch('tag_time_records_cloud', {
+          select: 'tag,seconds',
+          eq: ['device_id', DEVICE_ID],
+          gte: ['date', d], lte: ['date', d],
+        }),
+        sbFetch('time_records_cloud', {
+          select: 'display_name,process_name,project,tag,seconds',
+          eq: ['device_id', DEVICE_ID],
+          gte: ['date', d], lte: ['date', d],
+          order: 'seconds.desc', limit: 20,
+        }),
+        sbFetch('ai_token_daily_cloud', {
+          select: 'source,input_tokens,output_tokens,cached_tokens,sessions,messages',
+          eq: ['device_id', DEVICE_ID],
+          gte: ['date', d], lte: ['date', d],
+        }),
+        sbFetch('tool_call_daily_cloud', {
+          select: 'category,name,count',
+          eq: ['device_id', DEVICE_ID],
+          gte: ['date', d], lte: ['date', d],
+          order: 'count.desc',
+        }),
+        sbFetch('devin_activity_daily_cloud', {
+          select: 'data_json',
+          eq: ['device_id', DEVICE_ID],
+          gte: ['date', d], lte: ['date', d],
+        }),
+      ]);
+
+      var tags = results[0], apps = results[1], tokens = results[2], tools = results[3], activity = results[4];
+
+      // Tags
+      var tagMap = {};
+      var total = 0, indie = 0, work = 0;
+      for (var i = 0; i < tags.length; i++) {
+        var r = tags[i];
+        tagMap[r.tag] = (tagMap[r.tag] || 0) + r.seconds;
+        total += r.seconds;
+        if (r.tag === 'Indie') indie += r.seconds;
+        if (r.tag === 'Work') work += r.seconds;
+      }
+      var tagsList = Object.keys(tagMap).map(function(k) {
+        return { tag: k, seconds: tagMap[k] };
+      }).sort(function(a, b) { return b.seconds - a.seconds; });
+
+      // Apps
+      var appsList = apps.map(function(a) {
+        return {
+          name: a.display_name, tag: a.tag, seconds: a.seconds,
+          pct: total > 0 ? Math.round(a.seconds / total * 100) : 0,
+        };
+      });
+
+      // AI tokens
+      // Note: Codex (OpenAI API) stores input_tokens that INCLUDES cached_tokens,
+      // while Devin stores them separately. Cloud data may have mixed conventions.
+      // Heuristic: if cached <= input, cached is likely a subset of input (Codex).
+      var aiInput = 0, aiOutput = 0, aiCached = 0, aiSessions = 0, aiMessages = 0;
+      var sources = [];
+      for (var i = 0; i < tokens.length; i++) {
+        var r = tokens[i];
+        var inp = r.input_tokens || 0;
+        var out = r.output_tokens || 0;
+        var cac = r.cached_tokens || 0;
+        // If cached <= input, treat cached as subset of input (Codex convention).
+        // Total = input + output. For display, show input-cached as "new input".
+        var isNewSeparate = cac > inp;  // Devin convention: cached is separate
+        var t = isNewSeparate ? (inp + out + cac) : (inp + out);
+        aiInput += isNewSeparate ? inp : Math.max(0, inp - cac);
+        aiOutput += out;
+        aiCached += cac;
+        aiSessions += r.sessions || 0;
+        aiMessages += r.messages || 0;
+        sources.push({ source: r.source, tokens: t, sessions: r.sessions || 0 });
+      }
+      sources.sort(function(a, b) { return b.tokens - a.tokens; });
+      var aiTotal = aiInput + aiOutput + aiCached;
+
+      // Tools (MCP + Skill only)
+      var toolsList = tools
+        .filter(function(t) { return t.category === 'mcp' || t.category === 'skill'; })
+        .map(function(t) {
+          var shortName = t.name;
+          var parts = t.name.split('.');
+          if (parts.length >= 2) shortName = parts[parts.length - 1];
+          return { name: t.name, shortName: shortName, count: t.count, category: t.category };
+        })
+        .slice(0, 20);
+
+      // Activity
+      var actData = null;
+      if (activity.length > 0) {
+        try {
+          var raw = activity[0].data_json;
+          actData = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch(e) {}
+      }
+
+      data.value = {
+        totalSeconds: total, indieSeconds: indie, workSeconds: work,
+        tags: tagsList, apps: appsList,
+        ai: {
+          total: aiTotal, input: aiInput, output: aiOutput, cached: aiCached,
+          sessions: aiSessions, messages: aiMessages,
+          sources: sources, tools: toolsList,
+        },
+        activity: actData,
+      };
+    }
+
+    async function loadHeatmap() {
+      var end = new Date();
+      var start = new Date(end);
+      start.setDate(start.getDate() - 29);
+      start.setDate(start.getDate() - start.getDay()); // Align to Sunday
+
+      var startStr = localDateStr(start);
+      var endStr = localDateStr(end);
+
+      var tags = await sbFetch('tag_time_records_cloud', {
+        select: 'date,tag,seconds',
+        eq: ['device_id', DEVICE_ID],
+        gte: ['date', startStr], lte: ['date', endStr],
+        order: 'date.asc',
+      });
+
+      var dayMap = {};
+      for (var i = 0; i < tags.length; i++) {
+        if (tags[i].tag === 'Idle') continue;
+        dayMap[tags[i].date] = (dayMap[tags[i].date] || 0) + tags[i].seconds;
+      }
+
+      var cells = [];
+      var cursor = new Date(start);
+      var idx = 0;
+      while (cursor <= end) {
+        var ds = localDateStr(cursor);
+        cells.push({ key: 'hm' + idx++, date: ds, seconds: dayMap[ds] || 0 });
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      heatmapData.value = cells;
+    }
+
+    async function loadTrend() {
+      var end = new Date();
+      var start = new Date(end);
+      start.setDate(start.getDate() - 6);
+
+      var startStr = localDateStr(start);
+      var endStr = localDateStr(end);
+
+      var tags = await sbFetch('tag_time_records_cloud', {
+        select: 'date,tag,seconds',
+        eq: ['device_id', DEVICE_ID],
+        gte: ['date', startStr], lte: ['date', endStr],
+        order: 'date.asc',
+      });
+
+      var dayMap = {};
+      for (var i = 0; i < tags.length; i++) {
+        if (tags[i].tag === 'Idle') continue;
+        dayMap[tags[i].date] = (dayMap[tags[i].date] || 0) + tags[i].seconds;
+      }
+
+      var labels = ['日','一','二','三','四','五','六'];
+      var days = [];
+      var cursor = new Date(start);
+      while (cursor <= end) {
+        var ds = localDateStr(cursor);
+        days.push({
+          date: ds, seconds: dayMap[ds] || 0,
+          label: labels[cursor.getDay()],
+          isToday: ds === todayStr,
+        });
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      trend7.value = days;
+    }
+
+    Vue.onMounted(function() { loadAll(); });
+
+    return {
+      loading: loading, error: error, data: data,
+      todayStr: todayStr, selectedDate: selectedDate,
+      heatmapWeeks: heatmapWeeks, trend7: trend7, trendMax: trendMax,
+      tagColor: tagColor, heatmapLevel: heatmapLevel,
+      selectDate: selectDate, loadAll: loadAll,
+      fmtDur: fmtDur, fmtTokens: fmtTokens,
+    };
+  },
+});
+app.mount('#app');
+</script>
+</body>
+</html>

@@ -186,10 +186,15 @@ def _read_codex_file_tokens(filepath: Path) -> Optional[Dict]:
         logger.debug("Failed to read Codex file %s: %s", filepath, e)
     if not last_usage:
         return None
+    # Codex (OpenAI API): input_tokens INCLUDES cached_input_tokens.
+    # Subtract cached so that input = new (non-cached) tokens only,
+    # making total = input + output + cached correct without double-counting.
+    raw_input = int(last_usage.get("input_tokens", 0) or 0)
+    cached = int(last_usage.get("cached_input_tokens", 0) or 0)
     return {
-        "input": int(last_usage.get("input_tokens", 0) or 0),
+        "input": max(0, raw_input - cached),
         "output": int(last_usage.get("output_tokens", 0) or 0),
-        "cached": int(last_usage.get("cached_input_tokens", 0) or 0),
+        "cached": cached,
         "reasoning": int(last_usage.get("reasoning_output_tokens", 0) or 0),
         "model": model or "codex",
     }
@@ -223,6 +228,9 @@ def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
                     "output": int(usage.get("output_tokens", 0) or 0),
                     "cached": int(usage.get("cached_input_tokens", 0) or 0),
                 }
+                # Codex (OpenAI API): input_tokens INCLUDES cached_input_tokens.
+                # Normalize so input = new tokens only, matching Devin's convention.
+                current["input"] = max(0, current["input"] - current["cached"])
                 deltas = {}
                 for key, value in current.items():
                     old = previous.get(key, 0) if previous else 0
