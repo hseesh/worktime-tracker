@@ -656,7 +656,8 @@ def read_daily_devin_activity(target_date: str) -> Dict:
         con = sqlite3.connect(f"file:{_DEVIN_DB}?mode=ro", uri=True)
         cur = con.cursor()
         d = date.fromisoformat(target_date)
-        start_ts = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+        # Use local midnight, not UTC, for the date range
+        start_ts = int(datetime(d.year, d.month, d.day).timestamp())
         end_ts = start_ts + 86400
 
         sessions = cur.execute(
@@ -670,8 +671,8 @@ def read_daily_devin_activity(target_date: str) -> Dict:
             con.close()
             return result
 
-        # Per-project aggregation
-        proj_data: Dict[str, Dict] = defaultdict(lambda: {"sessions": 0, "messages": 0, "duration": 0})
+        # Per-project aggregation (track intervals to merge overlaps)
+        proj_data: Dict[str, Dict] = defaultdict(lambda: {"sessions": 0, "messages": 0, "intervals": []})
         agent_modes: Counter = Counter()
         backend_types: Counter = Counter()
         titles = []
@@ -683,7 +684,7 @@ def read_daily_devin_activity(target_date: str) -> Dict:
             # Normalize project path to last 2 path components
             proj = _normalize_project_path(wd)
             proj_data[proj]["sessions"] += 1
-            proj_data[proj]["duration"] += duration
+            proj_data[proj]["intervals"].append((created, last_activity))
             if agent_mode:
                 agent_modes[agent_mode] += 1
             if backend_type:
@@ -730,15 +731,17 @@ def read_daily_devin_activity(target_date: str) -> Dict:
 
         con.close()
 
-        # Build result from Devin data
+        # Build result from Devin data (store intervals for Codex merge later)
         projects = []
+        proj_intervals: Dict[str, list] = {}
         for proj, d in proj_data.items():
             projects.append({
                 "project": proj,
                 "sessions": d["sessions"],
                 "messages": d["messages"],
-                "duration": d["duration"],
+                "duration": _merged_duration(d["intervals"]),
             })
+            proj_intervals[proj] = list(d["intervals"])
         projects.sort(key=lambda x: -x["duration"])
 
         titles.sort(key=lambda x: -x["duration"])
@@ -759,7 +762,7 @@ def read_daily_devin_activity(target_date: str) -> Dict:
     codex_msg_dist: Counter = Counter()
     codex_tool_kinds: Counter = Counter()
     codex_backend_types: Counter = Counter()
-    codex_projects: Dict[str, Dict] = defaultdict(lambda: {"sessions": 0, "messages": 0, "duration": 0})
+    codex_projects: Dict[str, Dict] = defaultdict(lambda: {"sessions": 0, "messages": 0, "intervals": []})
     codex_titles = []
 
     for d_dir in (_CODEX_SESSIONS_DIR, _CODEX_ARCHIVED_DIR):
@@ -843,7 +846,8 @@ def read_daily_devin_activity(target_date: str) -> Dict:
                 proj = _normalize_project_path(cwd) if cwd else "codex"
                 codex_projects[proj]["sessions"] += 1
                 codex_projects[proj]["messages"] += user_msgs
-                codex_projects[proj]["duration"] += duration
+                if first_ts and last_ts:
+                    codex_projects[proj]["intervals"].append((first_ts, last_ts))
 
                 codex_msg_dist["user"] += user_msgs
                 codex_msg_dist["assistant"] += agent_msgs
@@ -859,23 +863,27 @@ def read_daily_devin_activity(target_date: str) -> Dict:
             except OSError:
                 pass
 
-    # Merge Codex into result
+    # Merge Codex into result (merge intervals across Devin+Codex to avoid
+    # double-counting overlapping parallel sessions)
     if codex_projects:
         existing_projs = {p["project"] for p in result["projects"]}
         for proj, d in codex_projects.items():
             if proj in existing_projs:
+                # Combine intervals from Devin + Codex and re-merge
+                all_intervals = proj_intervals.get(proj, []) + d["intervals"]
+                merged_dur = _merged_duration(all_intervals)
                 for p in result["projects"]:
                     if p["project"] == proj:
                         p["sessions"] += d["sessions"]
                         p["messages"] += d["messages"]
-                        p["duration"] += d["duration"]
+                        p["duration"] = merged_dur
                         break
             else:
                 result["projects"].append({
                     "project": proj,
                     "sessions": d["sessions"],
                     "messages": d["messages"],
-                    "duration": d["duration"],
+                    "duration": _merged_duration(d["intervals"]),
                 })
         result["projects"].sort(key=lambda x: -x["duration"])
 
@@ -902,3 +910,22 @@ def _normalize_project_path(wd: str) -> str:
     if len(parts) >= 2:
         return "/".join(parts[-2:])
     return parts[-1] if parts else wd
+
+
+def _merge_intervals(intervals: List[tuple]) -> List[tuple]:
+    """Merge overlapping time intervals (start, end) to avoid double-counting."""
+    if not intervals:
+        return []
+    intervals = sorted(intervals)
+    merged = [intervals[0]]
+    for s, e in intervals[1:]:
+        if s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _merged_duration(intervals: List[tuple]) -> int:
+    """Total seconds covered by merged intervals."""
+    return sum(int(e - s) for s, e in _merge_intervals(intervals))

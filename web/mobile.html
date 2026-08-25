@@ -104,10 +104,15 @@ body {
 .ai-breakdown-item.cached .v { color: var(--text-dim); }
 
 /* Source list */
-.source-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; }
+.source-row { padding: 7px 0; }
 .source-row + .source-row { border-top: 1px solid var(--border); }
-.source-name { font-size: 13px; font-weight: 500; }
-.source-tokens { font-size: 13px; color: var(--purple); font-weight: 600; }
+.source-head { display: flex; justify-content: space-between; align-items: center; }
+.source-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.source-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.source-stats { font-size: 11px; color: var(--text-muted); }
+.source-stats .tk { color: var(--purple); font-weight: 600; }
+.source-bar { height: 3px; border-radius: 2px; margin-top: 5px; background: var(--border); overflow: hidden; }
+.source-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
 
 /* Tool chips */
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -141,7 +146,7 @@ body {
 .heatmap { display: flex; flex-direction: column; gap: 4px; align-items: center; }
 .heatmap-row { display: flex; gap: 4px; }
 .hm-cell {
-  width: 16px; height: 16px; border-radius: 3px; background: #21262d;
+  width: 19px; height: 19px; border-radius: 4px; background: #21262d;
   cursor: pointer; transition: transform 0.1s;
 }
 .hm-cell:active { transform: scale(1.25); }
@@ -151,7 +156,7 @@ body {
 .hm-cell.l4 { background: #7fe0a8; }
 .hm-cell.selected { outline: 2px solid var(--blue); outline-offset: 1px; }
 .hm-legend { display: flex; align-items: center; gap: 4px; justify-content: flex-end; font-size: 10px; color: var(--text-muted); margin-top: 10px; }
-.hm-legend .hm-cell { width: 12px; height: 12px; cursor: default; }
+.hm-legend .hm-cell { width: 14px; height: 14px; cursor: default; }
 
 /* Trend */
 .trend { display: flex; align-items: flex-end; gap: 6px; margin-top: 10px; }
@@ -247,8 +252,16 @@ body {
           </div>
         </div>
         <div v-for="s in data.ai.sources" :key="s.source" class="source-row">
-          <span class="source-name">{{ s.source }}</span>
-          <span class="source-tokens">{{ fmtTokens(s.tokens) }} · {{ s.sessions }}s</span>
+          <div class="source-head">
+            <span class="source-name">
+              <span class="source-dot" :style="{background: sourceColor(s.source)}"></span>
+              {{ s.source }}
+            </span>
+            <span class="source-stats"><span class="tk">{{ fmtTokens(s.tokens) }}</span> · {{ s.sessions }}s · {{ s.messages }}m</span>
+          </div>
+          <div class="source-bar">
+            <div class="source-bar-fill" :style="{width: sourcePct(s) + '%', background: sourceColor(s.source)}"></div>
+          </div>
         </div>
       </div>
 
@@ -294,7 +307,7 @@ body {
 
       <!-- Today's Tasks -->
       <div class="card" v-if="data.activity && data.activity.titles && data.activity.titles.length">
-        <div class="card-title">� 任务列表</div>
+        <div class="card-title">📋 任务列表</div>
         <div v-for="(t, i) in data.activity.titles" :key="i" class="task">
           <span class="task-dur">{{ fmtDur(t.duration) }}</span>
           <span class="task-proj" :title="t.project">{{ t.project }}</span>
@@ -446,6 +459,20 @@ var app = Vue.createApp({
       return TAG_COLORS[tag] || '#bc8cff';
     }
 
+    var SOURCE_COLORS = ['#58a6ff', '#3fb950', '#bc8cff', '#f0883e', '#39d0d8', '#d29922', '#f85149', '#ff7b72'];
+    function sourceColor(name) {
+      var hash = 0;
+      for (var i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+      return SOURCE_COLORS[Math.abs(hash) % SOURCE_COLORS.length];
+    }
+    function sourcePct(s) {
+      var max = 0;
+      for (var i = 0; i < data.value.ai.sources.length; i++) {
+        if (data.value.ai.sources[i].tokens > max) max = data.value.ai.sources[i].tokens;
+      }
+      return max > 0 ? Math.round(s.tokens / max * 100) : 0;
+    }
+
     function heatmapLevel(cell) {
       if (!cell || !cell.date) return '';
       var s = cell.seconds || 0;
@@ -545,7 +572,7 @@ var app = Vue.createApp({
         aiCached += cac;
         aiSessions += r.sessions || 0;
         aiMessages += r.messages || 0;
-        sources.push({ source: r.source, tokens: t, sessions: r.sessions || 0 });
+        sources.push({ source: r.source, tokens: t, sessions: r.sessions || 0, messages: r.messages || 0 });
       }
       sources.sort(function(a, b) { return b.tokens - a.tokens; });
       var aiTotal = aiInput + aiOutput + aiCached;
@@ -658,6 +685,7 @@ var app = Vue.createApp({
       todayStr: todayStr, selectedDate: selectedDate,
       heatmapWeeks: heatmapWeeks, trend7: trend7, trendMax: trendMax,
       tagColor: tagColor, heatmapLevel: heatmapLevel,
+      sourceColor: sourceColor, sourcePct: sourcePct,
       selectDate: selectDate, loadAll: loadAll,
       fmtDur: fmtDur, fmtTokens: fmtTokens,
     };
