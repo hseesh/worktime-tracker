@@ -443,15 +443,17 @@ class WebServer:
                     "tool_calls": {}, "mcp_groups": [], "skill_items": [], "skill_total": 0, "other_tools": [],
                 }
 
-            # Devin session activity — use cache, fall back to live
+            # Devin session activity — today always live (data still changing);
+            # fall back to cache only if live read fails.
             try:
                 today_iso = date.today().isoformat()
-                devin_activity = self._recorder.get_devin_activity_daily(today_iso)
-                if not devin_activity or not devin_activity.get("projects"):
+                try:
                     devin_activity = read_daily_devin_activity(today_iso)
                     self._recorder.upsert_devin_activity_daily(
                         today_iso, __import__("json").dumps(devin_activity)
                     )
+                except Exception:
+                    devin_activity = self._recorder.get_devin_activity_daily(today_iso) or {}
             except Exception as e:
                 logger.warning("Failed to read devin activity: %s", e)
                 devin_activity = {"projects": [], "tool_kinds": {}, "agent_modes": {}, "backend_types": {}, "msg_dist": {}, "titles": []}
