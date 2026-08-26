@@ -136,11 +136,12 @@ body {
 .row-right { font-size: 14px; font-weight: 700; flex-shrink: 0; margin-left: 12px; }
 
 /* Task rows */
-.task { display: flex; gap: 8px; padding: 7px 0; }
+.task { display: flex; gap: 8px; padding: 7px 0; align-items: center; }
 .task + .task { border-top: 1px solid var(--border); }
 .task-dur { font-size: 11px; color: var(--text-muted); width: 36px; flex-shrink: 0; text-align: right; }
 .task-proj { font-size: 10px; color: var(--text-muted); width: 70px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-title { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-msgs { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
 
 /* Heatmap */
 .heatmap { display: flex; flex-direction: column; gap: 4px; align-items: center; }
@@ -312,6 +313,7 @@ body {
           <span class="task-dur">{{ fmtDur(t.duration) }}</span>
           <span class="task-proj" :title="t.project">{{ t.project }}</span>
           <span class="task-title" :title="t.title">{{ t.title }}</span>
+          <span v-if="t.messages" class="task-msgs">{{ t.messages }} msgs</span>
         </div>
       </div>
 
