@@ -448,6 +448,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
             <span class="text-dim" style="font-size:11px;width:40px;flex-shrink:0">{{ formatDurationSeconds(t.duration) }}</span>
             <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.title">{{ t.title }}</span>
+            <span v-if="t.messages" class="text-dim" style="font-size:11px;flex-shrink:0">{{ t.messages }} msgs</span>
           </div>
         </div>
       </div>
@@ -742,6 +743,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
                 <span class="text-dim" style="font-size:11px;width:40px;flex-shrink:0">{{ formatDurationSeconds(t.duration) }}</span>
                 <span style="color:var(--text-dim,#9aa5ce);font-size:11px;width:80px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.project">{{ t.project }}</span>
                 <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="t.title">{{ t.title }}</span>
+                <span v-if="t.messages" class="text-dim" style="font-size:11px;flex-shrink:0">{{ t.messages }} msgs</span>
               </div>
             </div>
           </div>

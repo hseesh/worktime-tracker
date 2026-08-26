@@ -691,6 +691,8 @@ def read_daily_devin_activity(target_date: str) -> Dict:
         backend_types: Counter = Counter()
         titles = []
         session_ids = []
+        # Map session_id -> user message count (filled in batch query below)
+        session_user_msgs: Dict[str, int] = {}
 
         for sid, wd, model, agent_mode, backend_type, created, last_activity, title in sessions:
             session_ids.append(sid)
@@ -704,7 +706,7 @@ def read_daily_devin_activity(target_date: str) -> Dict:
             if backend_type:
                 backend_types[backend_type] += 1
             if title and title.strip():
-                titles.append({"title": title.strip(), "duration": duration, "project": proj})
+                titles.append({"title": title.strip(), "duration": duration, "project": proj, "sid": sid})
 
         # Message distribution (batch query)
         msg_dist: Counter = Counter()
@@ -719,15 +721,23 @@ def read_daily_devin_activity(target_date: str) -> Dict:
             for role, cnt in rows:
                 if role and role != "system":
                     msg_dist[role] = cnt
-            # Add message counts to projects (user messages only)
-            for sid, wd, *_ in sessions:
-                proj = _normalize_project_path(wd)
+            # Per-session user message counts (role=user AND is_user_input=true,
+            # matching the token reader's user-sent message definition)
+            for sid in session_ids:
                 cnt = cur.execute(
                     "SELECT COUNT(*) FROM message_nodes WHERE session_id = ? "
-                    "AND json_extract(chat_message, '$.role') = 'user'",
+                    "AND json_extract(chat_message, '$.role') = 'user' "
+                    "AND json_extract(chat_message, '$.metadata.is_user_input') = 1",
                     (sid,),
                 ).fetchone()[0]
-                proj_data[proj]["messages"] += cnt
+                session_user_msgs[sid] = cnt
+                proj = None
+                for s in sessions:
+                    if s[0] == sid:
+                        proj = _normalize_project_path(s[1])
+                        break
+                if proj:
+                    proj_data[proj]["messages"] += cnt
 
         # Tool call kinds (batch query)
         tool_kinds: Counter = Counter()
@@ -760,6 +770,9 @@ def read_daily_devin_activity(target_date: str) -> Dict:
 
         titles.sort(key=lambda x: -x["duration"])
         titles = titles[:10]
+        # Attach user message counts and strip internal sid field
+        for t in titles:
+            t["messages"] = session_user_msgs.get(t.pop("sid", None), 0)
 
         result["projects"] = projects
         result["tool_kinds"] = dict(tool_kinds)
@@ -872,7 +885,7 @@ def read_daily_devin_activity(target_date: str) -> Dict:
                 if source:
                     codex_backend_types[f"codex-{source}"] += 1
                 if title:
-                    codex_titles.append({"title": title, "duration": duration, "project": proj})
+                    codex_titles.append({"title": title, "duration": duration, "project": proj, "messages": user_msgs})
 
             except OSError:
                 pass
