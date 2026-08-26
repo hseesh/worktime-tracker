@@ -101,7 +101,12 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             source_db = Path(td) / "sessions.db"
             conn = sqlite3.connect(source_db)
-            conn.execute("CREATE TABLE sessions (model TEXT, created_at INTEGER, metadata TEXT)")
+            conn.execute("CREATE TABLE sessions (id TEXT, model TEXT, created_at INTEGER, metadata TEXT)")
+            conn.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, parent_node_id INTEGER, "
+                "chat_message TEXT, created_at INTEGER, metadata TEXT)"
+            )
             local_one_am = datetime.combine(date.today(), time(1, 0))
             metadata = json.dumps({
                 "response_dimensions": [
@@ -109,8 +114,8 @@ class TestDataIntegrityRegressions(unittest.TestCase):
                 ]
             })
             conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?)",
-                ("model", int(local_one_am.timestamp()), metadata),
+                "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+                ("sess-1", "model", int(local_one_am.timestamp()), metadata),
             )
             conn.commit()
             conn.close()

@@ -89,6 +89,7 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
         return {}
 
     result: Dict[str, Dict] = {}
+    con = None
     try:
         con = sqlite3.connect(f"file:{_DEVIN_DB}?mode=ro", uri=True)
         cur = con.cursor()
@@ -97,20 +98,21 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
             d = date.fromisoformat(target_date)
             start_ts, end_ts = _local_day_epoch_range(d)
             rows = cur.execute(
-                "SELECT model, created_at, metadata FROM sessions "
+                "SELECT id, model, created_at, metadata FROM sessions "
                 "WHERE created_at >= ? AND created_at < ?",
                 (start_ts, end_ts),
             ).fetchall()
         else:
             rows = cur.execute(
-                "SELECT model, created_at, metadata FROM sessions"
+                "SELECT id, model, created_at, metadata FROM sessions"
             ).fetchall()
-        con.close()
     except sqlite3.Error as e:
         logger.warning("Failed to read Devin sessions.db: %s", e)
+        if con:
+            con.close()
         return {}
 
-    for model, created_at, meta in rows:
+    for sid, model, created_at, meta in rows:
         d_iso = _ts_to_date(created_at)
         if not d_iso:
             continue
@@ -122,7 +124,18 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
         inp = int(dims.get("input_tokens", 0) or 0)
         out = int(dims.get("output_tokens", 0) or 0)
         cached = int(dims.get("cached_input_tokens", 0) or 0)
-        msgs = int(dims.get("agent_messages", 0) or 0)
+        # Count user-sent messages from message_nodes (role=user AND is_user_input=true).
+        # Uses idx_message_nodes_session index for fast per-session lookup.
+        user_msgs = 0
+        try:
+            user_msgs = con.execute(
+                "SELECT COUNT(*) FROM message_nodes WHERE session_id = ? "
+                "AND json_extract(chat_message, '$.role') = 'user' "
+                "AND json_extract(chat_message, '$.metadata.is_user_input') = 1",
+                (sid,),
+            ).fetchone()[0]
+        except sqlite3.Error as e:
+            logger.debug("Failed to count user messages for session %s: %s", sid, e)
         mdl = model or "unknown"
         day = result.setdefault(d_iso, {})
         entry = day.setdefault(mdl, {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0})
@@ -130,7 +143,8 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
         entry["output"] += out
         entry["cached"] += cached
         entry["sessions"] += 1
-        entry["messages"] += msgs
+        entry["messages"] += user_msgs
+    con.close()
     return result
 
 
