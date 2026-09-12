@@ -633,6 +633,14 @@ def get_today_tokens() -> Dict:
     return summary
 
 
+def get_today_token_summary() -> Dict:
+    """Get today's core token numbers only (no tool-call details)."""
+    today = date.today().isoformat()
+    data = read_all_daily_tokens(target_date=today)
+    today_data = data.get(today, {})
+    return _summarize_day(today_data)
+
+
 def get_date_tokens(d_iso: str) -> Dict:
     """Get token summary for a specific date."""
     data = read_all_daily_tokens(target_date=d_iso)

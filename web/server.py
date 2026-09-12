@@ -15,7 +15,7 @@ from flask import Flask, jsonify, send_file, request, Response
 from werkzeug.serving import make_server
 
 from config import AppConfig, DB_FILE
-from tracker.ai_token_reader import get_today_tokens, format_tokens, read_all_daily_tokens, read_daily_tool_calls, read_today_tool_calls, read_daily_devin_activity
+from tracker.ai_token_reader import get_today_tokens, get_today_token_summary, format_tokens, read_all_daily_tokens, read_daily_tool_calls, read_today_tool_calls, read_daily_devin_activity
 from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.time_recorder import TimeRecorder
@@ -393,7 +393,28 @@ class WebServer:
                 "idle_time": _fmt_duration(self._recorder.get_today_idle_time()),
             })
 
-        # ---- API: Dashboard AI (tokens + activity, slower, polled less) ----
+        # ---- API: Dashboard AI tokens (fast, polled often) ----
+        @app.route("/api/dashboard/ai-tokens")
+        def api_dashboard_ai_tokens():
+            try:
+                ai_tokens = get_today_token_summary()
+                ai_tokens["total_display"] = format_tokens(ai_tokens["total_tokens"])
+                ai_tokens["input_display"] = format_tokens(ai_tokens["input_tokens"])
+                ai_tokens["output_display"] = format_tokens(ai_tokens["output_tokens"])
+                ai_tokens["cached_display"] = format_tokens(ai_tokens["cached_tokens"])
+                for s in ai_tokens["by_source"]:
+                    s["tokens_display"] = format_tokens(s["tokens"])
+            except Exception as e:
+                logger.warning("Failed to read AI token summary: %s", e)
+                ai_tokens = {
+                    "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
+                    "cached_tokens": 0, "sessions": 0, "messages": 0,
+                    "total_display": "0", "input_display": "0",
+                    "output_display": "0", "cached_display": "0", "by_source": [],
+                }
+            return jsonify({"ai_tokens": ai_tokens})
+
+        # ---- API: Dashboard AI activity (tool calls + devin, slower, polled less) ----
         @app.route("/api/dashboard/ai")
         def api_dashboard_ai():
             # AI token usage (live read from Devin sessions.db + Codex JSONL)

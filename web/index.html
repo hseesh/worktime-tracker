@@ -1063,6 +1063,18 @@ createApp({
       nextTick(() => { updatePieChart(); updateTimelineChart(); });
     }
 
+    let aiTokensLoading = false;
+    async function loadAITokens() {
+      if (aiTokensLoading) return;
+      aiTokensLoading = true;
+      try {
+        const d = await api('/api/dashboard/ai-tokens');
+        if (d.ai_tokens) Object.assign(dash.ai_tokens, d.ai_tokens);
+      } finally {
+        aiTokensLoading = false;
+      }
+    }
+
     let aiDashboardLoading = false;
     async function loadAIDashboard() {
       if (aiDashboardLoading) return;
@@ -1603,10 +1615,11 @@ createApp({
       }, true);
     }
 
-    let dashTimer, liveDashTimer, eventTimer, aiDashTimer;
+    let dashTimer, liveDashTimer, eventTimer, aiTokensTimer, aiDashTimer;
 
     onMounted(() => {
       loadDashboard();
+      loadAITokens();
       loadAIDashboard();
       loadLiveDashboard();
       loadHistory();
@@ -1614,6 +1627,7 @@ createApp({
       loadSettings();
       loadEfficiency();
       dashTimer = setInterval(loadDashboard, 5000);
+      aiTokensTimer = setInterval(loadAITokens, 5000);
       aiDashTimer = setInterval(loadAIDashboard, 30000);
       liveDashTimer = setInterval(loadLiveDashboard, 500);
       eventTimer = setInterval(loadEvents, 3000);
@@ -1621,6 +1635,7 @@ createApp({
 
     onUnmounted(() => {
       clearInterval(dashTimer);
+      clearInterval(aiTokensTimer);
       clearInterval(aiDashTimer);
       clearInterval(liveDashTimer);
       clearInterval(eventTimer);
@@ -1637,6 +1652,7 @@ createApp({
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         loadDashboard();
+        loadAITokens();
         loadAIDashboard();
         loadLiveDashboard();
       }

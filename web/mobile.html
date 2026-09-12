@@ -376,7 +376,8 @@ body {
 <script>
 const SUPABASE_URL = 'https://hqlqqthkiulmozgxbnxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_V3VfpbZEjZUbvQ4DYilXWQ_x02ikkUs';
-const DEVICE_ID = '6a0f049d-c856-4e77-947a-bd132717a1fe';
+// The mobile page always aggregates every device (see README: multi-device
+// merge = SUM all device_id rows), so queries intentionally omit device_id.
 
 async function sbFetch(table, params) {
   let url = SUPABASE_URL + '/rest/v1/' + table + '?';
@@ -422,6 +423,37 @@ function localDateStr(d) {
   return d.getFullYear() + '-' +
     String(d.getMonth() + 1).padStart(2, '0') + '-' +
     String(d.getDate()).padStart(2, '0');
+}
+
+// Merge one device's devin_activity snapshot into the accumulated result so the
+// day view reflects every device instead of only the first row.
+function mergeActivity(target, part) {
+  var projMap = {};
+  target.projects.forEach(function(p) { projMap[p.project] = p; });
+  (part.projects || []).forEach(function(p) {
+    var cur = projMap[p.project];
+    if (cur) {
+      cur.sessions += p.sessions || 0;
+      cur.messages += p.messages || 0;
+      cur.duration += p.duration || 0;
+    } else {
+      projMap[p.project] = {
+        project: p.project, sessions: p.sessions || 0,
+        messages: p.messages || 0, duration: p.duration || 0,
+      };
+    }
+  });
+  target.projects = Object.keys(projMap).map(function(k) { return projMap[k]; })
+    .sort(function(a, b) { return b.duration - a.duration; });
+
+  ['tool_kinds', 'agent_modes', 'backend_types', 'msg_dist'].forEach(function(field) {
+    var src = part[field] || {};
+    for (var k in src) target[field][k] = (target[field][k] || 0) + src[k];
+  });
+
+  (part.titles || []).forEach(function(t) { target.titles.push(t); });
+  target.titles.sort(function(a, b) { return b.duration - a.duration; });
+  target.titles = target.titles.slice(0, 10);
 }
 
 var TAG_COLORS = {
@@ -503,29 +535,24 @@ var app = Vue.createApp({
       var results = await Promise.all([
         sbFetch('tag_time_records_cloud', {
           select: 'tag,seconds',
-          eq: ['device_id', DEVICE_ID],
           gte: ['date', d], lte: ['date', d],
         }),
         sbFetch('time_records_cloud', {
           select: 'display_name,process_name,project,tag,seconds',
-          eq: ['device_id', DEVICE_ID],
           gte: ['date', d], lte: ['date', d],
-          order: 'seconds.desc', limit: 20,
+          order: 'seconds.desc',
         }),
         sbFetch('ai_token_daily_cloud', {
           select: 'source,input_tokens,output_tokens,cached_tokens,sessions,messages',
-          eq: ['device_id', DEVICE_ID],
           gte: ['date', d], lte: ['date', d],
         }),
         sbFetch('tool_call_daily_cloud', {
           select: 'category,name,count',
-          eq: ['device_id', DEVICE_ID],
           gte: ['date', d], lte: ['date', d],
           order: 'count.desc',
         }),
         sbFetch('devin_activity_daily_cloud', {
           select: 'data_json',
-          eq: ['device_id', DEVICE_ID],
           gte: ['date', d], lte: ['date', d],
         }),
       ]);
@@ -546,57 +573,82 @@ var app = Vue.createApp({
         return { tag: k, seconds: tagMap[k] };
       }).sort(function(a, b) { return b.seconds - a.seconds; });
 
-      // Apps
-      var appsList = apps.map(function(a) {
+      // Apps (same app/tag may appear on several devices -> sum them)
+      var appMap = {};
+      for (var i = 0; i < apps.length; i++) {
+        var a = apps[i];
+        var appKey = a.display_name + '\u0000' + a.tag;
+        if (!appMap[appKey]) appMap[appKey] = { name: a.display_name, tag: a.tag, seconds: 0 };
+        appMap[appKey].seconds += a.seconds;
+      }
+      var appsList = Object.keys(appMap).map(function(k) {
+        var a = appMap[k];
         return {
-          name: a.display_name, tag: a.tag, seconds: a.seconds,
+          name: a.name, tag: a.tag, seconds: a.seconds,
           pct: total > 0 ? Math.round(a.seconds / total * 100) : 0,
         };
-      });
+      }).sort(function(a, b) { return b.seconds - a.seconds; });
 
       // AI tokens
-      // Note: Codex (OpenAI API) stores input_tokens that INCLUDES cached_tokens,
-      // while Devin stores them separately. Cloud data may have mixed conventions.
-      // Heuristic: if cached <= input, cached is likely a subset of input (Codex).
+      // Cloud rows are already normalized at write time (ai_token_reader.py
+      // subtracts cached from Codex input), so input_tokens never includes
+      // cached_tokens and the total is always input + output + cached.
       var aiInput = 0, aiOutput = 0, aiCached = 0, aiSessions = 0, aiMessages = 0;
-      var sources = [];
+      var sourceMap = {};
       for (var i = 0; i < tokens.length; i++) {
         var r = tokens[i];
         var inp = r.input_tokens || 0;
         var out = r.output_tokens || 0;
         var cac = r.cached_tokens || 0;
-        // If cached <= input, treat cached as subset of input (Codex convention).
-        // Total = input + output. For display, show input-cached as "new input".
-        var isNewSeparate = cac > inp;  // Devin convention: cached is separate
-        var t = isNewSeparate ? (inp + out + cac) : (inp + out);
-        aiInput += isNewSeparate ? inp : Math.max(0, inp - cac);
+        aiInput += inp;
         aiOutput += out;
         aiCached += cac;
         aiSessions += r.sessions || 0;
         aiMessages += r.messages || 0;
-        sources.push({ source: r.source, tokens: t, sessions: r.sessions || 0, messages: r.messages || 0 });
+        // Same source can exist on several devices -> sum per source.
+        var s = sourceMap[r.source] || (sourceMap[r.source] = {
+          source: r.source, tokens: 0, sessions: 0, messages: 0,
+        });
+        s.tokens += inp + out + cac;
+        s.sessions += r.sessions || 0;
+        s.messages += r.messages || 0;
       }
-      sources.sort(function(a, b) { return b.tokens - a.tokens; });
+      var sources = Object.keys(sourceMap).map(function(k) { return sourceMap[k]; })
+        .sort(function(a, b) { return b.tokens - a.tokens; });
       var aiTotal = aiInput + aiOutput + aiCached;
 
-      // Tools (MCP + Skill only)
-      var toolsList = tools
-        .filter(function(t) { return t.category === 'mcp' || t.category === 'skill'; })
-        .map(function(t) {
-          var shortName = t.name;
-          var parts = t.name.split('.');
-          if (parts.length >= 2) shortName = parts[parts.length - 1];
-          return { name: t.name, shortName: shortName, count: t.count, category: t.category };
-        })
-        .slice(0, 20);
+      // Tools (MCP + Skill only, summed across devices)
+      var toolMap = {};
+      for (var i = 0; i < tools.length; i++) {
+        var t = tools[i];
+        if (t.category !== 'mcp' && t.category !== 'skill') continue;
+        var toolKey = t.category + '\u0000' + t.name;
+        if (!toolMap[toolKey]) toolMap[toolKey] = { name: t.name, category: t.category, count: 0 };
+        toolMap[toolKey].count += t.count;
+      }
+      var toolsList = Object.keys(toolMap).map(function(k) {
+        var t = toolMap[k];
+        var parts = t.name.split('.');
+        return {
+          name: t.name,
+          shortName: parts.length >= 2 ? parts[parts.length - 1] : t.name,
+          count: t.count, category: t.category,
+        };
+      }).sort(function(a, b) { return b.count - a.count; }).slice(0, 20);
 
-      // Activity
+      // Activity: merge every device's snapshot for the day
       var actData = null;
-      if (activity.length > 0) {
+      for (var i = 0; i < activity.length; i++) {
+        var raw = activity[i].data_json;
+        var part = null;
         try {
-          var raw = activity[0].data_json;
-          actData = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          part = typeof raw === 'string' ? JSON.parse(raw) : raw;
         } catch(e) {}
+        if (!part) continue;
+        if (!actData) {
+          actData = { projects: [], tool_kinds: {}, agent_modes: {}, backend_types: {}, msg_dist: {}, titles: [] };
+        }
+        mergeActivity(actData, part);
       }
 
       data.value = {
@@ -622,7 +674,6 @@ var app = Vue.createApp({
 
       var tags = await sbFetch('tag_time_records_cloud', {
         select: 'date,tag,seconds',
-        eq: ['device_id', DEVICE_ID],
         gte: ['date', startStr], lte: ['date', endStr],
         order: 'date.asc',
       });
@@ -654,7 +705,6 @@ var app = Vue.createApp({
 
       var tags = await sbFetch('tag_time_records_cloud', {
         select: 'date,tag,seconds',
-        eq: ['device_id', DEVICE_ID],
         gte: ['date', startStr], lte: ['date', endStr],
         order: 'date.asc',
       });
