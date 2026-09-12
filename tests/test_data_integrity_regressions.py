@@ -129,6 +129,57 @@ class TestDataIntegrityRegressions(unittest.TestCase):
 
         self.assertEqual(result[date.today().isoformat()]["model"]["input"], 123)
 
+    def test_devin_tokens_fall_back_to_message_metrics(self):
+        """Newer Devin builds drop response_dimensions; usage is per message."""
+        with tempfile.TemporaryDirectory() as td:
+            source_db = Path(td) / "sessions.db"
+            conn = sqlite3.connect(source_db)
+            conn.execute("CREATE TABLE sessions (id TEXT, model TEXT, created_at INTEGER, metadata TEXT)")
+            conn.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, parent_node_id INTEGER, "
+                "chat_message TEXT, created_at INTEGER, metadata TEXT)"
+            )
+            created = int(datetime.combine(date.today(), time(10, 0)).timestamp())
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+                ("sess-1", "glm-5-2", created, json.dumps({"total_credit_cost": 0})),
+            )
+
+            def node(node_id, role, metrics=None, message_id=None):
+                chat = {"message_id": message_id, "role": role, "metadata": {"metrics": metrics}}
+                conn.execute(
+                    "INSERT INTO message_nodes (session_id, node_id, parent_node_id, "
+                    "chat_message, created_at, metadata) VALUES (?, ?, ?, ?, ?, NULL)",
+                    ("sess-1", node_id, node_id - 1, json.dumps(chat), created),
+                )
+
+            node(0, "user", message_id="u-1")
+            # cache_creation_tokens are new input tokens for Anthropic-style models.
+            first = {"input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 20,
+                     "cache_creation_tokens": 50}
+            node(1, "assistant", first, "a-1")
+            # Branching/compaction stores the same message again: must not double count.
+            node(2, "assistant", first, "a-1")
+            node(3, "assistant",
+                 {"input_tokens": 5, "output_tokens": 7, "cache_read_tokens": 30,
+                  "cache_creation_tokens": None}, "a-2")
+            conn.commit()
+            conn.close()
+
+            old_db = ai_reader._DEVIN_DB
+            ai_reader._DEVIN_DB = source_db
+            try:
+                result = ai_reader.read_devin_daily_tokens(date.today().isoformat())
+            finally:
+                ai_reader._DEVIN_DB = old_db
+
+        entry = result[date.today().isoformat()]["glm-5-2"]
+        self.assertEqual(entry["input"], 155)
+        self.assertEqual(entry["output"], 17)
+        self.assertEqual(entry["cached"], 50)
+        self.assertEqual(entry["sessions"], 1)
+
     def test_empty_cache_days_are_marked_and_not_rescanned(self):
         with patch("tracker.ai_token_reader.read_all_daily_tokens", return_value={}) as ai_scan:
             self.recorder.sync_ai_token_cache(days=2)

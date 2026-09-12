@@ -46,6 +46,48 @@ def _extract_devin_dims(meta_json: str) -> Optional[Dict]:
     return out if out else None
 
 
+def _read_devin_message_metrics(con: sqlite3.Connection, sid: str) -> Optional[Dict]:
+    """Aggregate per-assistant-message token metrics for one Devin session.
+
+    Devin builds from 2026-09-12 (schema v17) no longer write
+    ``response_dimensions`` into sessions.metadata; usage is only kept per
+    assistant message at ``message_nodes.chat_message -> metadata.metrics``.
+    Nodes are grouped by message_id because branching/compaction stores the
+    same message multiple times, and summing them would double-count.
+
+    ``cache_creation_tokens`` are new input tokens written to the prompt cache
+    (Anthropic-style models report ``input_tokens`` as only the uncached part),
+    so they are folded into ``input``.
+    """
+    try:
+        rows = con.execute(
+            "SELECT json_extract(chat_message, '$.metadata.metrics') AS metrics "
+            "FROM message_nodes WHERE row_id IN ("
+            "SELECT MAX(row_id) FROM message_nodes WHERE session_id = ? "
+            "AND json_extract(chat_message, '$.role') = 'assistant' "
+            "AND json_extract(chat_message, '$.metadata.metrics') IS NOT NULL "
+            "GROUP BY COALESCE(json_extract(chat_message, '$.message_id'), node_id))",
+            (sid,),
+        ).fetchall()
+    except sqlite3.Error as e:
+        logger.debug("Failed to read message metrics for session %s: %s", sid, e)
+        return None
+    if not rows:
+        return None
+    inp = out = cached = 0
+    for (raw,) in rows:
+        try:
+            m = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(m, dict):
+            continue
+        inp += int(m.get("input_tokens", 0) or 0) + int(m.get("cache_creation_tokens", 0) or 0)
+        out += int(m.get("output_tokens", 0) or 0)
+        cached += int(m.get("cache_read_tokens", 0) or 0)
+    return {"input": inp, "output": out, "cached": cached}
+
+
 def _ts_to_date(ts) -> Optional[str]:
     """Convert a unix timestamp (int/float/str) to local ISO date string."""
     try:
@@ -119,11 +161,17 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
         if target_date and d_iso != target_date:
             continue
         dims = _extract_devin_dims(meta)
-        if not dims:
-            continue
-        inp = int(dims.get("input_tokens", 0) or 0)
-        out = int(dims.get("output_tokens", 0) or 0)
-        cached = int(dims.get("cached_input_tokens", 0) or 0)
+        if dims:
+            inp = int(dims.get("input_tokens", 0) or 0)
+            out = int(dims.get("output_tokens", 0) or 0)
+            cached = int(dims.get("cached_input_tokens", 0) or 0)
+        else:
+            # Newer Devin builds stopped writing response_dimensions, so fall
+            # back to the per-message usage metrics.
+            metrics = _read_devin_message_metrics(con, sid)
+            if not metrics:
+                continue
+            inp, out, cached = metrics["input"], metrics["output"], metrics["cached"]
         # Count user-sent messages from message_nodes (role=user AND is_user_input=true).
         # Uses idx_message_nodes_session index for fast per-session lookup.
         user_msgs = 0
