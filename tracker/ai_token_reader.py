@@ -1,7 +1,8 @@
-"""Read AI token usage from Devin CLI sessions.db and Codex JSONL files.
+"""Read AI token usage from Devin CLI sessions.db and Codex/WorkBuddy JSONL files.
 
-Devin:  C:\\Users\\<user>\\AppData\\Roaming\\devin\\cli\\sessions.db (SQLite)
-Codex:  ~/.codex/sessions/**/*.jsonl  +  ~/.codex/archived_sessions/**/*.jsonl
+Devin:     C:\\Users\\<user>\\AppData\\Roaming\\devin\\cli\\sessions.db (SQLite)
+Codex:     ~/.codex/sessions/**/*.jsonl  +  ~/.codex/archived_sessions/**/*.jsonl
+WorkBuddy: ~/.workbuddy-ai/projects/**/*.jsonl
 
 All reads are read-only and never modify the source databases/files.
 """
@@ -21,6 +22,7 @@ _HOME = Path.home()
 _DEVIN_DB = _HOME / "AppData" / "Roaming" / "devin" / "cli" / "sessions.db"
 _CODEX_SESSIONS_DIR = _HOME / ".codex" / "sessions"
 _CODEX_ARCHIVED_DIR = _HOME / ".codex" / "archived_sessions"
+_WORKBUDDY_PROJECTS_DIR = _HOME / ".workbuddy-ai" / "projects"
 
 
 def _extract_devin_dims(meta_json: str) -> Optional[Dict]:
@@ -587,8 +589,124 @@ def read_codex_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
     return result
 
 
+def _workbuddy_usage(obj: Dict) -> Optional[Dict]:
+    """Normalize one WorkBuddy transcript entry into token counts.
+
+    WorkBuddy writes a ``providerData.usage`` block on the function_call /
+    assistant entry of every request.  ``inputTokens`` is the whole prompt
+    (cache hit + miss), so cached reads are subtracted back out to match the
+    Devin/Codex convention of ``input`` = new tokens only.
+    """
+    pd = obj.get("providerData")
+    if not isinstance(pd, dict):
+        return None
+    usage = pd.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    raw = pd.get("rawUsage") if isinstance(pd.get("rawUsage"), dict) else {}
+
+    cached = 0
+    for detail in usage.get("inputTokensDetails") or []:
+        if isinstance(detail, dict):
+            cached += int(detail.get("cached_tokens") or 0)
+    if not cached:
+        cached = int(raw.get("prompt_cache_hit_tokens") or raw.get("cache_read_input_tokens") or 0)
+    # Cache writes are billed as input but reported separately.
+    written = int(raw.get("cache_creation_input_tokens") or raw.get("prompt_cache_write_tokens") or 0)
+
+    inp = int(usage.get("inputTokens") or 0) - cached + written
+    return {
+        "input": max(0, inp),
+        "output": int(usage.get("outputTokens") or 0),
+        "cached": cached,
+        # Prefix so WorkBuddy models stay distinguishable from Devin/Codex ones
+        # (e.g. "deepseek-v4.1-flash" vs Devin's "deepseek-v4-1-flash-high").
+        "model": f"workbuddy/{pd.get('model') or 'unknown'}",
+        "message_id": pd.get("messageId"),
+    }
+
+
+def _workbuddy_entry_date(obj: Dict, fallback: str = "") -> str:
+    """Convert a WorkBuddy entry timestamp (milliseconds) to a local ISO date."""
+    ts = obj.get("timestamp")
+    if not ts:
+        return fallback
+    try:
+        return datetime.fromtimestamp(int(ts) / 1000).date().isoformat()
+    except (ValueError, TypeError, OSError):
+        return fallback
+
+
+def read_workbuddy_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
+    """Read WorkBuddy token usage grouped by date and model.
+
+    WorkBuddy keeps one JSONL transcript per session under
+    ``~/.workbuddy-ai/projects/<project>/<session>.jsonl``.  Transcript names
+    carry no date, so a file is only skipped when it was last modified before
+    *target_date* and each entry is dated by its own timestamp.
+    """
+    result: Dict[str, Dict] = {}
+    if not _WORKBUDDY_PROJECTS_DIR.exists():
+        return result
+
+    for filepath in _WORKBUDDY_PROJECTS_DIR.rglob("*.jsonl"):
+        try:
+            modified_date = datetime.fromtimestamp(filepath.stat().st_mtime).date().isoformat()
+        except OSError:
+            continue
+        if target_date and modified_date < target_date:
+            continue
+
+        file_days: Dict[str, Dict] = {}
+        seen_ids = set()
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    entry = _workbuddy_usage(obj)
+                    if not entry:
+                        continue
+                    # One request may be echoed on several entries.
+                    if entry["message_id"]:
+                        if entry["message_id"] in seen_ids:
+                            continue
+                        seen_ids.add(entry["message_id"])
+                    d_iso = _workbuddy_entry_date(obj, modified_date)
+                    if not d_iso or (target_date and d_iso != target_date):
+                        continue
+                    acc = file_days.setdefault(d_iso, {}).setdefault(
+                        entry["model"],
+                        {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                    )
+                    acc["input"] += entry["input"]
+                    acc["output"] += entry["output"]
+                    acc["cached"] += entry["cached"]
+                    acc["messages"] += 1
+        except OSError as e:
+            logger.debug("Failed to read WorkBuddy file %s: %s", filepath, e)
+            continue
+
+        for d_iso, models in file_days.items():
+            day = result.setdefault(d_iso, {})
+            for model, entry in models.items():
+                acc = day.setdefault(
+                    model,
+                    {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                )
+                for key in ("input", "output", "cached", "messages"):
+                    acc[key] += entry[key]
+                acc["sessions"] += 1
+    return result
+
+
 def read_all_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
-    """Merge Devin + Codex daily token data.
+    """Merge Devin + Codex + WorkBuddy daily token data.
 
     Returns:
         {date_iso: {model_or_source: {"input", "output", "cached", "sessions", "messages"}}}
@@ -597,6 +715,7 @@ def read_all_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
     for source_data in (
         read_devin_daily_tokens(target_date),
         read_codex_daily_tokens(target_date),
+        read_workbuddy_daily_tokens(target_date),
     ):
         for d_iso, sources in source_data.items():
             day = result.setdefault(d_iso, {})

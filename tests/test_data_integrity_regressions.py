@@ -180,6 +180,61 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         self.assertEqual(entry["cached"], 50)
         self.assertEqual(entry["sessions"], 1)
 
+    def test_workbuddy_tokens_split_by_entry_date(self):
+        """WorkBuddy usage is per request and dated by the entry timestamp."""
+        with tempfile.TemporaryDirectory() as td:
+            projects = Path(td) / "projects" / "some-project"
+            projects.mkdir(parents=True)
+            transcript = projects / "session-1.jsonl"
+
+            def entry(day, hour, message_id, usage, raw=None):
+                ts = int(datetime.combine(day, time(hour, 0)).timestamp() * 1000)
+                return json.dumps({
+                    "id": message_id, "timestamp": ts, "type": "function_call",
+                    "providerData": {
+                        "messageId": message_id, "model": "wb-model",
+                        "usage": usage, "rawUsage": raw or {},
+                    },
+                })
+
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+            rows = [
+                # inputTokens is the whole prompt: 1000 - 400 cached = 600 new.
+                entry(today, 10, "m-1", {
+                    "inputTokens": 1000, "outputTokens": 100,
+                    "inputTokensDetails": [{"cached_tokens": 400}],
+                }),
+                # The same request echoed again must not be counted twice.
+                entry(today, 10, "m-1", {
+                    "inputTokens": 1000, "outputTokens": 100,
+                    "inputTokensDetails": [{"cached_tokens": 400}],
+                }),
+                # Cache writes are billed as input but reported separately.
+                entry(today, 11, "m-2", {"inputTokens": 500, "outputTokens": 50},
+                      {"cache_creation_input_tokens": 200}),
+                entry(yesterday, 9, "m-0", {
+                    "inputTokens": 300, "outputTokens": 30,
+                    "inputTokensDetails": [{"cached_tokens": 0}],
+                }),
+            ]
+            transcript.write_text("\n".join(rows), encoding="utf-8")
+
+            old_dir = ai_reader._WORKBUDDY_PROJECTS_DIR
+            ai_reader._WORKBUDDY_PROJECTS_DIR = Path(td) / "projects"
+            try:
+                result = ai_reader.read_workbuddy_daily_tokens()
+            finally:
+                ai_reader._WORKBUDDY_PROJECTS_DIR = old_dir
+
+        today_entry = result[today.isoformat()]["workbuddy/wb-model"]
+        self.assertEqual(today_entry["input"], 1300)
+        self.assertEqual(today_entry["output"], 150)
+        self.assertEqual(today_entry["cached"], 400)
+        self.assertEqual(today_entry["messages"], 2)
+        self.assertEqual(today_entry["sessions"], 1)
+        self.assertEqual(result[yesterday.isoformat()]["workbuddy/wb-model"]["input"], 300)
+
     def test_empty_cache_days_are_marked_and_not_rescanned(self):
         with patch("tracker.ai_token_reader.read_all_daily_tokens", return_value={}) as ai_scan:
             self.recorder.sync_ai_token_cache(days=2)
