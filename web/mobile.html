@@ -425,6 +425,15 @@ function localDateStr(d) {
     String(d.getDate()).padStart(2, '0');
 }
 
+// Drop the provider prefix from a token source: codebuddy/deepseek-v4.1-flash
+// -> deepseek-v4.1-flash. Keeps one model from being listed per provider.
+function normalizeTokenSource(source) {
+  var name = (source || '').trim();
+  var slash = name.indexOf('/');
+  if (slash > 0 && slash < name.length - 1) return name.slice(slash + 1);
+  return name || 'unknown';
+}
+
 // Merge one device's devin_activity snapshot into the accumulated result so the
 // day view reflects every device instead of only the first row.
 function mergeActivity(target, part) {
@@ -593,6 +602,9 @@ var app = Vue.createApp({
       // Cloud rows are already normalized at write time (ai_token_reader.py
       // subtracts cached from Codex input), so input_tokens never includes
       // cached_tokens and the total is always input + output + cached.
+      // Rows pushed before sources were normalized may still carry a provider
+      // prefix (codebuddy/deepseek-v4.1-flash); the prefix is dropped here so
+      // the same model is not listed twice.
       var aiInput = 0, aiOutput = 0, aiCached = 0, aiSessions = 0, aiMessages = 0;
       var sourceMap = {};
       for (var i = 0; i < tokens.length; i++) {
@@ -605,9 +617,10 @@ var app = Vue.createApp({
         aiCached += cac;
         aiSessions += r.sessions || 0;
         aiMessages += r.messages || 0;
-        // Same source can exist on several devices -> sum per source.
-        var s = sourceMap[r.source] || (sourceMap[r.source] = {
-          source: r.source, tokens: 0, sessions: 0, messages: 0,
+        // Same model can exist on several devices / providers -> sum per model.
+        var model = self.normalizeTokenSource(r.source);
+        var s = sourceMap[model] || (sourceMap[model] = {
+          source: model, tokens: 0, sessions: 0, messages: 0,
         });
         s.tokens += inp + out + cac;
         s.sessions += r.sessions || 0;
@@ -740,6 +753,7 @@ var app = Vue.createApp({
       sourceColor: sourceColor, sourcePct: sourcePct,
       selectDate: selectDate, loadAll: loadAll,
       fmtDur: fmtDur, fmtTokens: fmtTokens,
+      normalizeTokenSource: normalizeTokenSource,
     };
   },
 });

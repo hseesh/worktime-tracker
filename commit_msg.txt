@@ -1,12 +1,4 @@
-perf: split dashboard API and move config to project dir
-
-- Split /api/dashboard into fast (344ms) + /api/dashboard/ai (505ms)
-- Frontend polls dashboard 5s, AI data 30s, parallel on first load
-- Add visibilitychange listener to refresh on tab focus
-- Move config.json + worktime.db from ~/.worktime-tracker to project dir
-- Exclude system messages from message counts (only count user msgs)
-- Truncate long Codex session titles, ellipsis overflow in UI
-- Add config.json to .gitignore (contains anon_key)
+chore: add config.json to repo
 
 Generated with [Devin](https://devin.ai)
 

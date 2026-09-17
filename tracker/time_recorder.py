@@ -1233,6 +1233,40 @@ class TimeRecorder:
         rng = self.get_ai_token_daily_range(date.today(), date.today())
         return rng.get(today, {})
 
+    def get_local_ai_token_daily(self, d_iso: str) -> Dict[str, Dict]:
+        """Return this device's cached {model: {input, output, cached, sessions, messages}}.
+
+        Unlike :meth:`get_ai_token_daily_range` this is not merged across
+        devices, matching what a live source scan of this machine would report.
+
+        Rows written before sources were normalized still carry a provider
+        prefix (``codebuddy/deepseek-v4.1-flash``); they are folded onto the
+        bare model name on read so the same model is not reported twice.
+        """
+        from tracker.ai_token_reader import normalize_token_source
+
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT source, input_tokens, output_tokens, cached_tokens, "
+                "sessions, messages FROM ai_token_daily WHERE device_id = ? AND date = ?",
+                (self._device_id, d_iso),
+            ).fetchall()
+        finally:
+            conn.close()
+        merged: Dict[str, Dict] = {}
+        for r in rows:
+            entry = merged.setdefault(
+                normalize_token_source(r["source"]),
+                {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+            )
+            entry["input"] += r["input_tokens"]
+            entry["output"] += r["output_tokens"]
+            entry["cached"] += r["cached_tokens"]
+            entry["sessions"] += r["sessions"]
+            entry["messages"] += r["messages"]
+        return merged
+
     def get_cached_token_dates(self) -> set:
         """Return dates whose local source scan completed, including empty days."""
         conn = self._conn()
@@ -1320,9 +1354,8 @@ class TimeRecorder:
     def refresh_today_ai_token_cache(self):
         """Refresh today's AI token cache from live source data.
 
-        Called periodically (e.g. every 30 min) so today's cached values
-        stay fresh for cloud sync. The dashboard/heatmap still read live
-        for display; this is only for the cloud sync push.
+        Called periodically (see main.py) so both the dashboard card and the
+        cloud sync push read fresh values without rescanning the sources.
         """
         self.refresh_ai_token_cache_for_date(date.today().isoformat())
 

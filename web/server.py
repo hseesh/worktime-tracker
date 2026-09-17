@@ -15,7 +15,17 @@ from flask import Flask, jsonify, send_file, request, Response
 from werkzeug.serving import make_server
 
 from config import AppConfig, DB_FILE
-from tracker.ai_token_reader import get_today_tokens, get_today_token_summary, format_tokens, read_all_daily_tokens, read_daily_tool_calls, read_today_tool_calls, read_daily_devin_activity
+from tracker.ai_token_reader import (
+    get_today_tokens,
+    get_today_token_summary,
+    format_tokens,
+    normalize_token_source,
+    read_all_daily_tokens,
+    read_daily_tool_calls,
+    read_today_tool_calls,
+    read_daily_devin_activity,
+    _summarize_day,
+)
 from tracker.chrome_url_cache import ChromeUrlCache
 from tracker.codex_activity_manager import CodexActivityManager
 from tracker.time_recorder import TimeRecorder
@@ -42,8 +52,70 @@ def _fmt_duration(seconds: float) -> str:
     return f"{s}s"
 
 
+def _merge_token_sources(day_data: Dict) -> Dict:
+    """Fold cached rows onto bare model names: ``codebuddy/x`` + ``x`` -> one ``x``.
+
+    Applied on read so history keeps working with rows written before provider
+    prefixes were dropped, without rewriting the cache table.
+    """
+    merged: Dict[str, Dict] = {}
+    for source, entry in (day_data or {}).items():
+        acc = merged.setdefault(
+            normalize_token_source(source),
+            {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+        )
+        for key in ("input", "output", "cached", "sessions", "messages"):
+            acc[key] += entry.get(key, 0)
+    return merged
+
+
+def _summarize_merged_cached_tokens(day_data: Dict) -> Dict:
+    """Same as :func:`_summarize_cached_tokens` on merged (bare-model) day data.
+
+    Cached day data mixes rows written before and after source normalization;
+    the legacy Codex heuristic (``cached <= input`` means cached is already part
+    of input) is only meaningful on the original row, so rows are merged first
+    and the per-model total is taken as ``max(input, input + cached) + output``.
+    Merging must not change the total, or History would disagree with the
+    Today card for a day that has already been cached.
+    """
+    merged = _merge_token_sources(day_data)
+    total_input = total_output = total_cached = total_sessions = total_messages = 0
+    by_source = []
+    for source, entry in merged.items():
+        inp = entry.get("input", 0)
+        out = entry.get("output", 0)
+        cached = entry.get("cached", 0)
+        if cached <= inp and cached > 0:
+            inp = inp - cached  # Normalize: input = new tokens only
+        total_input += inp
+        total_output += out
+        total_cached += cached
+        total_sessions += entry.get("sessions", 0)
+        total_messages += entry.get("messages", 0)
+        by_source.append({
+            "source": source,
+            "tokens": inp + out + cached,
+            "input": inp,
+            "output": out,
+            "cached": cached,
+            "sessions": entry.get("sessions", 0),
+            "messages": entry.get("messages", 0),
+        })
+    by_source.sort(key=lambda x: -x["tokens"])
+    return {
+        "total_tokens": total_input + total_output + total_cached,
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "cached_tokens": total_cached,
+        "sessions": total_sessions,
+        "messages": total_messages,
+        "by_source": by_source,
+    }
+
+
 def _summarize_cached_tokens(day_data: Dict) -> Dict:
-    """Convert cached {source: {input, output, cached, sessions, messages}} to dashboard format.
+    """Convert cached {model: {input, output, cached, sessions, messages}} to dashboard format.
 
     Handles mixed conventions: Codex (OpenAI API) stores input_tokens that INCLUDES
     cached_tokens, while Devin stores them separately. Heuristic: if cached <= input,
@@ -51,7 +123,7 @@ def _summarize_cached_tokens(day_data: Dict) -> Dict:
     """
     total_input = total_output = total_cached = total_sessions = total_messages = 0
     by_source = []
-    for source, entry in day_data.items():
+    for source, entry in _merge_token_sources(day_data).items():
         inp = entry.get("input", 0)
         out = entry.get("output", 0)
         cached = entry.get("cached", 0)
@@ -178,6 +250,44 @@ class WebServer:
             "current_windows": current_windows,
             "current_codex": current_codex,
         }
+
+    def _today_token_summary(self) -> Dict:
+        """Today's token summary, read from the local cache table.
+
+        A background thread refreshes today's cache (see main.py), so the 5 s
+        dashboard poll no longer rescans Devin's sessions.db and the
+        Codex/WorkBuddy JSONL files. Falls back to a live read only while the
+        first startup scan has not finished yet.
+
+        Uses the same summarizer as the live read so the card keeps reporting
+        the numbers it did before (``_summarize_cached_tokens`` additionally
+        applies the legacy Codex normalization used for past history days).
+        """
+        today = date.today()
+        if today.isoformat() not in self._recorder.get_cached_token_dates():
+            return get_today_token_summary()
+        return _summarize_day(
+            self._recorder.get_local_ai_token_daily(today.isoformat())
+        )
+
+    def _today_tool_calls(self) -> Dict:
+        """Today's MCP/skill counts from the cache, in read_today_tool_calls() shape."""
+        today = date.today()
+        if today.isoformat() not in self._recorder.get_cached_tool_call_dates():
+            return read_today_tool_calls()
+        day = self._recorder.get_tool_call_daily_range(today, today).get(today.isoformat(), {})
+        return {
+            "counts": {},
+            "mcp_detail": day.get("mcp", {}),
+            "skill_detail": day.get("skill", {}),
+        }
+
+    def _today_devin_activity(self) -> Dict:
+        """Today's Devin session activity, read from the local cache table."""
+        today = date.today().isoformat()
+        if today not in self._recorder.get_cached_devin_activity_dates():
+            return read_daily_devin_activity(today)
+        return self._recorder.get_devin_activity_daily(today) or {}
 
     def _create_app(self) -> Flask:
         app = Flask(__name__, static_folder=str(WEB_DIR))
@@ -397,7 +507,7 @@ class WebServer:
         @app.route("/api/dashboard/ai-tokens")
         def api_dashboard_ai_tokens():
             try:
-                ai_tokens = get_today_token_summary()
+                ai_tokens = self._today_token_summary()
                 ai_tokens["total_display"] = format_tokens(ai_tokens["total_tokens"])
                 ai_tokens["input_display"] = format_tokens(ai_tokens["input_tokens"])
                 ai_tokens["output_display"] = format_tokens(ai_tokens["output_tokens"])
@@ -417,9 +527,9 @@ class WebServer:
         # ---- API: Dashboard AI activity (tool calls + devin, slower, polled less) ----
         @app.route("/api/dashboard/ai")
         def api_dashboard_ai():
-            # AI token usage (live read from Devin sessions.db + Codex JSONL)
+            # AI token usage + tool calls, read from today's cache rows.
             try:
-                ai_tokens = get_today_tokens()
+                ai_tokens = self._today_token_summary()
                 ai_tokens["total_display"] = format_tokens(ai_tokens["total_tokens"])
                 ai_tokens["input_display"] = format_tokens(ai_tokens["input_tokens"])
                 ai_tokens["output_display"] = format_tokens(ai_tokens["output_tokens"])
@@ -427,7 +537,7 @@ class WebServer:
                 for s in ai_tokens["by_source"]:
                     s["tokens_display"] = format_tokens(s["tokens"])
                 # Build tool call summary for display
-                tc_wrap = ai_tokens.get("tool_calls", {})
+                tc_wrap = ai_tokens["tool_calls"] = self._today_tool_calls()
                 tc = tc_wrap.get("counts", {}) if isinstance(tc_wrap, dict) else {}
                 mcp_detail = tc_wrap.get("mcp_detail", {}) if isinstance(tc_wrap, dict) else {}
                 skill_detail = tc_wrap.get("skill_detail", {}) if isinstance(tc_wrap, dict) else {}
@@ -464,17 +574,10 @@ class WebServer:
                     "tool_calls": {}, "mcp_groups": [], "skill_items": [], "skill_total": 0, "other_tools": [],
                 }
 
-            # Devin session activity — today always live (data still changing);
-            # fall back to cache only if live read fails.
+            # Devin session activity — from today's cache row, which the
+            # background refresher keeps up to date.
             try:
-                today_iso = date.today().isoformat()
-                try:
-                    devin_activity = read_daily_devin_activity(today_iso)
-                    self._recorder.upsert_devin_activity_daily(
-                        today_iso, __import__("json").dumps(devin_activity)
-                    )
-                except Exception:
-                    devin_activity = self._recorder.get_devin_activity_daily(today_iso) or {}
+                devin_activity = self._today_devin_activity()
             except Exception as e:
                 logger.warning("Failed to read devin activity: %s", e)
                 devin_activity = {"projects": [], "tool_kinds": {}, "agent_modes": {}, "backend_types": {}, "msg_dist": {}, "titles": []}
@@ -665,7 +768,7 @@ class WebServer:
             daily_token_totals = {}  # date_iso -> total_tokens
             for d_iso, sources in cached_tokens.items():
                 day_total = 0
-                for entry in sources.values():
+                for entry in _merge_token_sources(sources).values():
                     inp = entry.get("input", 0)
                     out = entry.get("output", 0)
                     cac = entry.get("cached", 0)
@@ -784,7 +887,7 @@ class WebServer:
                     cached = self._recorder.get_ai_token_daily_range(selected, selected)
                     day_data = cached.get(selected_iso, {})
                     if day_data:
-                        ai_tokens = _summarize_cached_tokens(day_data)
+                        ai_tokens = _summarize_merged_cached_tokens(day_data)
                 if ai_tokens:
                     ai_tokens["total_display"] = format_tokens(ai_tokens["total_tokens"])
                     ai_tokens["input_display"] = format_tokens(ai_tokens["input_tokens"])

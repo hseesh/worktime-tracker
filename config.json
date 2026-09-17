@@ -24,7 +24,8 @@
     "Cockpit Tools-1.3.14-installer.exe": "Other (Cockpit Tools-1.3.14-installer.exe)",
     "wps.exe": "Other (wps.exe)",
     "哔哩哔哩.exe": "Other (哔哩哔哩.exe)",
-    "Qoder.exe": "Other (Qoder.exe)"
+    "Qoder.exe": "Other (Qoder.exe)",
+    "WorkBuddyAI.exe": "Other (WorkBuddyAI.exe)"
   },
   "idle_threshold": 300,
   "poll_interval": 1000,
@@ -306,6 +307,9 @@
     },
     "qoder.exe": {
       "display:other (qoder.exe)": "Indie"
+    },
+    "workbuddyai.exe": {
+      "display:other (workbuddyai.exe)": "Indie"
     }
   },
   "url_tag_rules": {
@@ -354,5 +358,5 @@
     "enabled": true
   },
   "device_id": "6a0f049d-c856-4e77-947a-bd132717a1fe",
-  "last_sync_date": "2026-08-24"
+  "last_sync_date": "2026-09-08"
 }

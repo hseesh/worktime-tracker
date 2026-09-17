@@ -25,6 +25,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("worktime-tracker")
 
+# How often today's dashboard caches (AI tokens, tool calls, Devin activity)
+# are refreshed from the source files. The dashboard reads those cached rows
+# instead of rescanning Devin's sessions.db and the Codex/WorkBuddy JSONL
+# files on every poll, so this interval trades display freshness for CPU.
+TODAY_CACHE_REFRESH_SECONDS = 30
+
 
 def _create_tray_icon():
     """Create a system tray icon using pystray."""
@@ -83,6 +89,25 @@ def main():
 
     ai_sync_thread = threading.Thread(target=_sync_ai_tokens, name="ai-token-sync", daemon=True)
     ai_sync_thread.start()
+
+    # Keep today's cache rows fresh so the dashboard can read them instead of
+    # rescanning the sources on every poll. Runs regardless of cloud sync.
+    def _today_cache_loop():
+        # The startup scan above already covers today; wait for it so the two
+        # scans do not overlap during the first minutes.
+        ai_sync_thread.join()
+        while True:
+            threading.Event().wait(timeout=TODAY_CACHE_REFRESH_SECONDS)
+            try:
+                recorder.refresh_today_ai_token_cache()
+                recorder.refresh_today_tool_call_cache()
+                recorder.refresh_today_devin_activity_cache()
+            except Exception as e:
+                logger.warning("Today cache refresh failed: %s", e)
+
+    threading.Thread(
+        target=_today_cache_loop, name="today-cache-refresh", daemon=True
+    ).start()
 
     # Cloud sync: push/pull all daily aggregates (time + AI tokens + tool calls,
     # including today) to/from Supabase. Runs once at startup, then every 30

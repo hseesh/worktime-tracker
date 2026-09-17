@@ -197,9 +197,17 @@ class TestDataIntegrityRegressions(unittest.TestCase):
                     },
                 })
 
+            def user_msg(day, hour, message_id):
+                ts = int(datetime.combine(day, time(hour, 0)).timestamp() * 1000)
+                return json.dumps({
+                    "id": message_id, "timestamp": ts, "type": "message",
+                    "role": "user", "content": [{"type": "input_text", "text": "hi"}],
+                })
+
             today = date.today()
             yesterday = today - timedelta(days=1)
             rows = [
+                user_msg(today, 9, "u-1"),
                 # inputTokens is the whole prompt: 1000 - 400 cached = 600 new.
                 entry(today, 10, "m-1", {
                     "inputTokens": 1000, "outputTokens": 100,
@@ -210,9 +218,15 @@ class TestDataIntegrityRegressions(unittest.TestCase):
                     "inputTokens": 1000, "outputTokens": 100,
                     "inputTokensDetails": [{"cached_tokens": 400}],
                 }),
+                user_msg(today, 10, "u-2"),
+                # The same user message echoed again must not be counted twice.
+                user_msg(today, 10, "u-2"),
                 # Cache writes are billed as input but reported separately.
                 entry(today, 11, "m-2", {"inputTokens": 500, "outputTokens": 50},
                       {"cache_creation_input_tokens": 200}),
+                # A further tool round in the same turn is not another message.
+                entry(today, 11, "m-3", {"inputTokens": 100, "outputTokens": 10}),
+                user_msg(yesterday, 8, "u-0"),
                 entry(yesterday, 9, "m-0", {
                     "inputTokens": 300, "outputTokens": 30,
                     "inputTokensDetails": [{"cached_tokens": 0}],
@@ -227,13 +241,16 @@ class TestDataIntegrityRegressions(unittest.TestCase):
             finally:
                 ai_reader._WORKBUDDY_PROJECTS_DIR = old_dir
 
-        today_entry = result[today.isoformat()]["workbuddy/wb-model"]
-        self.assertEqual(today_entry["input"], 1300)
-        self.assertEqual(today_entry["output"], 150)
+        today_entry = result[today.isoformat()]["wb-model"]
+        self.assertEqual(today_entry["input"], 1400)
+        self.assertEqual(today_entry["output"], 160)
         self.assertEqual(today_entry["cached"], 400)
+        # Two user messages, three API requests.
         self.assertEqual(today_entry["messages"], 2)
         self.assertEqual(today_entry["sessions"], 1)
-        self.assertEqual(result[yesterday.isoformat()]["workbuddy/wb-model"]["input"], 300)
+        yesterday_entry = result[yesterday.isoformat()]["wb-model"]
+        self.assertEqual(yesterday_entry["input"], 300)
+        self.assertEqual(yesterday_entry["messages"], 1)
 
     def test_empty_cache_days_are_marked_and_not_rescanned(self):
         with patch("tracker.ai_token_reader.read_all_daily_tokens", return_value={}) as ai_scan:
@@ -310,6 +327,57 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         self.assertEqual(result[first_day.isoformat()]["codex"]["input"], 100)
         self.assertEqual(result[second_day.isoformat()]["codex"]["input"], 50)
         self.assertEqual(result[second_day.isoformat()]["codex"]["cached"], 20)
+
+    def test_codex_user_messages_are_counted_per_local_day(self):
+        """Only user-typed messages count, not the injected per-turn context."""
+        with tempfile.TemporaryDirectory() as td:
+            sessions = Path(td) / "sessions"
+            archived = Path(td) / "archived"
+            sessions.mkdir()
+            archived.mkdir()
+            first_day = date.today() - timedelta(days=1)
+            second_day = date.today()
+            local_tz = datetime.now().astimezone().tzinfo
+            first_ts = datetime.combine(first_day, time(23, 59), tzinfo=local_tz).isoformat()
+            second_ts = datetime.combine(second_day, time(0, 1), tzinfo=local_tz).isoformat()
+            rollout = sessions / f"rollout-{first_day.isoformat()}T23-59-00-test.jsonl"
+
+            def user_msg(ts, text):
+                return {
+                    "timestamp": ts, "type": "response_item",
+                    "payload": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+
+            rows = [
+                {"type": "session_meta", "payload": {"base_instructions": {"provenance": {"model": "codex"}}}},
+                # Framework context injected at the start of the turn.
+                user_msg(first_ts, "<environment_context>\n  <cwd>D:\\Work</cwd>\n</environment_context>"),
+                user_msg(first_ts, "first prompt"),
+                {"timestamp": first_ts, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 100, "output_tokens": 10, "cached_input_tokens": 80}}}},
+                # A message with no plain text part is context too.
+                user_msg(second_ts, "<recommended_plugins>\n- Airtable\n</recommended_plugins>"),
+                user_msg(second_ts, "second prompt"),
+                {"timestamp": second_ts, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 150, "output_tokens": 20, "cached_input_tokens": 100}}}},
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+            old_sessions = ai_reader._CODEX_SESSIONS_DIR
+            old_archived = ai_reader._CODEX_ARCHIVED_DIR
+            ai_reader._CODEX_SESSIONS_DIR = sessions
+            ai_reader._CODEX_ARCHIVED_DIR = archived
+            try:
+                result = ai_reader.read_codex_daily_tokens()
+            finally:
+                ai_reader._CODEX_SESSIONS_DIR = old_sessions
+                ai_reader._CODEX_ARCHIVED_DIR = old_archived
+
+        self.assertEqual(result[first_day.isoformat()]["codex"]["messages"], 1)
+        self.assertEqual(result[second_day.isoformat()]["codex"]["messages"], 1)
+        self.assertEqual(result[first_day.isoformat()]["codex"]["sessions"], 1)
+        self.assertEqual(result[second_day.isoformat()]["codex"]["sessions"], 1)
 
     def test_all_history_uses_cloud_only_dates(self):
         old_date = (date.today() - timedelta(days=100)).isoformat()

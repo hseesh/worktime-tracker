@@ -1,8 +1,9 @@
-"""Read AI token usage from Devin CLI sessions.db and Codex/WorkBuddy JSONL files.
+"""Read AI token usage from Devin CLI sessions.db and Codex/WorkBuddy/DSH JSONL files.
 
 Devin:     C:\\Users\\<user>\\AppData\\Roaming\\devin\\cli\\sessions.db (SQLite)
 Codex:     ~/.codex/sessions/**/*.jsonl  +  ~/.codex/archived_sessions/**/*.jsonl
 WorkBuddy: ~/.workbuddy-ai/projects/**/*.jsonl
+DSH:       <DSH_HOME>/sessions/**/*.jsonl.zstd (zstd-compressed JSONL)
 
 All reads are read-only and never modify the source databases/files.
 """
@@ -264,11 +265,39 @@ def _read_codex_file_tokens(filepath: Path) -> Optional[Dict]:
     }
 
 
+def _is_codex_user_message(payload: Dict) -> bool:
+    """True when a Codex ``response_item`` message carries user-typed text.
+
+    Codex also records framework context as a ``role=user`` message at the
+    start of a turn (``<environment_context>``, ``<recommended_plugins>``,
+    ``<turn_aborted>``, ...). Those are not something the user sent, so only
+    messages with at least one plain text part are counted.
+    """
+    for item in payload.get("content") or []:
+        if not isinstance(item, dict) or item.get("type") != "input_text":
+            continue
+        text = (item.get("text") or "").lstrip()
+        if text and not text.startswith("<"):
+            return True
+    return False
+
+
 def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
-    """Split cumulative Codex token counters into local-day deltas."""
+    """Split cumulative Codex token counters into local-day deltas.
+
+    ``messages`` counts the user-typed messages of the transcript, matching
+    how Devin sessions are counted.
+    """
     model = "codex"
     previous = None
     daily: Dict[str, Dict] = {}
+
+    def day_entry(d_iso: str) -> Dict:
+        return daily.setdefault(
+            d_iso,
+            {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+        )
+
     fallback_date = _codex_file_date(filepath) or ""
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -281,6 +310,17 @@ def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
                     payload = obj.get("payload") or {}
                     provenance = (payload.get("base_instructions") or {}).get("provenance") or {}
                     model = provenance.get("model") or model
+                    continue
+                if obj.get("type") == "response_item":
+                    payload = obj.get("payload") or {}
+                    if (
+                        payload.get("type") == "message"
+                        and payload.get("role") == "user"
+                        and _is_codex_user_message(payload)
+                    ):
+                        d_iso = _event_local_date(obj, fallback_date)
+                        if d_iso:
+                            day_entry(d_iso)["messages"] += 1
                     continue
                 if obj.get("type") != "event_msg" or (obj.get("payload") or {}).get("type") != "token_count":
                     continue
@@ -306,10 +346,8 @@ def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
                 d_iso = _event_local_date(obj, fallback_date)
                 if not d_iso:
                     continue
-                entry = daily.setdefault(
-                    d_iso,
-                    {"input": 0, "output": 0, "cached": 0, "sessions": 1, "messages": 0},
-                )
+                entry = day_entry(d_iso)
+                entry["sessions"] = 1
                 for key, value in deltas.items():
                     entry[key] += value
     except OSError as e:
@@ -619,9 +657,7 @@ def _workbuddy_usage(obj: Dict) -> Optional[Dict]:
         "input": max(0, inp),
         "output": int(usage.get("outputTokens") or 0),
         "cached": cached,
-        # Prefix so WorkBuddy models stay distinguishable from Devin/Codex ones
-        # (e.g. "deepseek-v4.1-flash" vs Devin's "deepseek-v4-1-flash-high").
-        "model": f"workbuddy/{pd.get('model') or 'unknown'}",
+        "model": pd.get("model") or "unknown",
         "message_id": pd.get("messageId"),
     }
 
@@ -644,6 +680,10 @@ def read_workbuddy_daily_tokens(target_date: Optional[str] = None) -> Dict[str, 
     ``~/.workbuddy-ai/projects/<project>/<session>.jsonl``.  Transcript names
     carry no date, so a file is only skipped when it was last modified before
     *target_date* and each entry is dated by its own timestamp.
+
+    ``messages`` counts the user-side messages of the conversation (one per
+    turn), matching how Devin sessions are counted - not the number of API
+    requests, which is one per tool round and an order of magnitude larger.
     """
     result: Dict[str, Dict] = {}
     if not _WORKBUDDY_PROJECTS_DIR.exists():
@@ -659,6 +699,10 @@ def read_workbuddy_daily_tokens(target_date: Optional[str] = None) -> Dict[str, 
 
         file_days: Dict[str, Dict] = {}
         seen_ids = set()
+        seen_user_ids = set()
+        # A user message carries no model, so it is held back until the request
+        # it triggered reveals which model handled the turn.
+        pending_user: List[str] = []
         try:
             with open(filepath, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
@@ -669,6 +713,18 @@ def read_workbuddy_daily_tokens(target_date: Optional[str] = None) -> Dict[str, 
                         obj = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+
+                    if obj.get("type") == "message" and obj.get("role") == "user":
+                        user_id = obj.get("id")
+                        if user_id and user_id in seen_user_ids:
+                            continue
+                        if user_id:
+                            seen_user_ids.add(user_id)
+                        d_iso = _workbuddy_entry_date(obj, modified_date)
+                        if d_iso and (not target_date or d_iso == target_date):
+                            pending_user.append(d_iso)
+                        continue
+
                     entry = _workbuddy_usage(obj)
                     if not entry:
                         continue
@@ -687,7 +743,15 @@ def read_workbuddy_daily_tokens(target_date: Optional[str] = None) -> Dict[str, 
                     acc["input"] += entry["input"]
                     acc["output"] += entry["output"]
                     acc["cached"] += entry["cached"]
-                    acc["messages"] += 1
+                    # Every request of a turn belongs to the model that answered
+                    # it; only the user message itself is counted once.
+                    for user_day in pending_user:
+                        user_acc = file_days.setdefault(user_day, {}).setdefault(
+                            entry["model"],
+                            {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                        )
+                        user_acc["messages"] += 1
+                    pending_user = []
         except OSError as e:
             logger.debug("Failed to read WorkBuddy file %s: %s", filepath, e)
             continue
@@ -705,27 +769,196 @@ def read_workbuddy_daily_tokens(target_date: Optional[str] = None) -> Dict[str, 
     return result
 
 
-def read_all_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
-    """Merge Devin + Codex + WorkBuddy daily token data.
+def _dsh_entry_date(obj: Dict, fallback: str = "") -> str:
+    """Convert a DSH event timestamp (milliseconds) to a local ISO date."""
+    ts = obj.get("time")
+    if not ts:
+        return fallback
+    try:
+        return datetime.fromtimestamp(int(ts) / 1000).date().isoformat()
+    except (ValueError, TypeError, OSError):
+        return fallback
+
+
+def _iter_dsh_jsonl(filepath: Path):
+    """Yield parsed events from a DSH session log (plain or zstd-compressed)."""
+    if filepath.suffix == ".zstd":
+        try:
+            import zstandard
+        except ImportError:
+            logger.warning("zstandard not installed; skipping DSH session %s", filepath)
+            return
+        with open(filepath, "rb") as f:
+            text = zstandard.ZstdDecompressor().stream_reader(f).read().decode("utf-8", "replace")
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                yield line
+    else:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield line
+
+
+def read_dsh_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
+    """Read DeepSeek Harness token usage grouped by date and model.
+
+    DSH keeps one session log per session under
+    ``<DSH_HOME>/sessions/--<workspace>--/session-*/session.v3.jsonl.zstd``.
+    ``assistant/message`` events carry ``data.usage`` plus the serving
+    ``data.message.source.{provider,model}``; ``user/message`` events with
+    ``source.kind == 'user'`` are real user-typed turns (``kind: 'plugin'``
+    entries are injected notices and context, not counted).
+
+    The log uses append semantics: a message can be re-logged after branching
+    or compaction, so assistant entries are deduplicated by message id.
 
     Returns:
-        {date_iso: {model_or_source: {"input", "output", "cached", "sessions", "messages"}}}
+        {date_iso: {provider/model: {"input", "output", "cached", "sessions", "messages"}}}
+    """
+    result: Dict[str, Dict] = {}
+    dsh_home = os.environ.get("DSH_HOME") or r"D:\DSH\home"
+    sessions_dir = Path(dsh_home) / "sessions"
+    if not sessions_dir.exists():
+        return result
+
+    for filepath in sessions_dir.rglob("*.jsonl*"):
+        try:
+            modified_date = datetime.fromtimestamp(filepath.stat().st_mtime).date().isoformat()
+        except OSError:
+            continue
+        if target_date and modified_date < target_date:
+            continue
+
+        file_days: Dict[str, Dict] = {}
+        seen_msg_ids = set()
+        seen_user_ids = set()
+        pending_user: List[str] = []
+        try:
+            for line in _iter_dsh_jsonl(filepath):
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = obj.get("type")
+
+                if etype == "user/message":
+                    data = obj.get("data") or {}
+                    if (data.get("source") or {}).get("kind") != "user":
+                        continue
+                    user_id = data.get("id")
+                    if user_id and user_id in seen_user_ids:
+                        continue
+                    if user_id:
+                        seen_user_ids.add(user_id)
+                    d_iso = _dsh_entry_date(obj, modified_date)
+                    if d_iso and (not target_date or d_iso == target_date):
+                        pending_user.append(d_iso)
+                    continue
+
+                if etype != "assistant/message":
+                    continue
+                data = obj.get("data") or {}
+                usage = data.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                message = data.get("message") or {}
+                msg_id = message.get("id")
+                if msg_id:
+                    if msg_id in seen_msg_ids:
+                        continue
+                    seen_msg_ids.add(msg_id)
+                source = message.get("source") or {}
+                model = source.get("model") or "unknown"
+                provider = source.get("provider") or "dsh"
+                key = f"{provider}/{model}"
+                d_iso = _dsh_entry_date(obj, modified_date)
+                if not d_iso or (target_date and d_iso != target_date):
+                    continue
+                inp = int(usage.get("inputTokens") or 0)
+                # Reasoning tokens are billed output; fold them in since the
+                # shared schema has no reasoning field.
+                out = int(usage.get("outputTokens") or 0) + int(usage.get("reasoningTokens") or 0)
+                cached = int(usage.get("cacheReadTokens") or 0)
+                acc = file_days.setdefault(d_iso, {}).setdefault(
+                    key,
+                    {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                )
+                acc["input"] += inp
+                acc["output"] += out
+                acc["cached"] += cached
+                for user_day in pending_user:
+                    user_acc = file_days.setdefault(user_day, {}).setdefault(
+                        key,
+                        {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                    )
+                    user_acc["messages"] += 1
+                pending_user = []
+        except OSError as e:
+            logger.debug("Failed to read DSH session %s: %s", filepath, e)
+            continue
+
+        for d_iso, models in file_days.items():
+            day = result.setdefault(d_iso, {})
+            for model, entry in models.items():
+                acc = day.setdefault(
+                    model,
+                    {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                )
+                for key in ("input", "output", "cached", "messages"):
+                    acc[key] += entry[key]
+                acc["sessions"] += 1
+    return result
+
+
+def normalize_token_source(source: str) -> str:
+    """Strip the provider prefix from a source name: ``codebuddy/gpt-5.6-sol`` -> ``gpt-5.6-sol``.
+
+    DSH logs the serving provider next to the model, which splits one model
+    across several rows once the same model is reachable through more than one
+    provider. The dashboard reports token usage per model, so the prefix (and
+    the provider dimension it carries) is dropped and equal model names merge.
+    """
+    name = (source or "").strip()
+    if "/" in name:
+        head, tail = name.split("/", 1)
+        if head and tail:
+            return tail
+    return name or "unknown"
+
+
+def _merge_token_day(dst: Dict[str, Dict], src: Dict[str, Dict]):
+    """Accumulate one ``{source: counters}`` mapping into *dst*, merging by model name."""
+    for source, values in src.items():
+        entry = dst.setdefault(
+            normalize_token_source(source),
+            {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+        )
+        for key in ("input", "output", "cached", "sessions", "messages"):
+            entry[key] += values.get(key, 0)
+
+
+def read_all_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
+    """Merge Devin + Codex + WorkBuddy + DSH daily token data.
+
+    Source names are normalized to the bare model name, so the same model
+    reported by two providers (``codebuddy/deepseek-v4.1-flash`` and
+    ``deepseek-v4.1-flash``) ends up as a single row.
+
+    Returns:
+        {date_iso: {model: {"input", "output", "cached", "sessions", "messages"}}}
     """
     result: Dict[str, Dict] = {}
     for source_data in (
         read_devin_daily_tokens(target_date),
         read_codex_daily_tokens(target_date),
         read_workbuddy_daily_tokens(target_date),
+        read_dsh_daily_tokens(target_date),
     ):
         for d_iso, sources in source_data.items():
-            day = result.setdefault(d_iso, {})
-            for source, values in sources.items():
-                entry = day.setdefault(
-                    source,
-                    {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
-                )
-                for key in ("input", "output", "cached", "sessions", "messages"):
-                    entry[key] += values.get(key, 0)
+            _merge_token_day(result.setdefault(d_iso, {}), sources)
     return result
 
 
