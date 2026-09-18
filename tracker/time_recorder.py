@@ -171,7 +171,20 @@ class TimeRecorder:
     tracker thread and the UI thread do not share a single connection object.
     """
 
-    def __init__(self, device_id: str = ""):
+    def __init__(self, device_id: str):
+        """Open the recorder for *device_id*.
+
+        ``device_id`` is required: it is the first column of every aggregate
+        key, and ``_init_db`` backfills today's tag totals under whatever id it
+        is given. Defaulting it to "" let a caller that forgot the argument
+        silently write a duplicate copy of the day's totals under an empty id,
+        which then summed into every dashboard figure.
+        """
+        if not device_id:
+            raise ValueError(
+                "device_id is required: an empty id would backfill a duplicate "
+                "set of rows under an empty device key"
+            )
         DB_FILE.parent.mkdir(parents=True, exist_ok=True)
         self._device_id = device_id
         self._init_db()
@@ -216,6 +229,10 @@ class TimeRecorder:
 
     def _migrate_current_tag_totals(self, conn):
         """Backfill today's de-duplicated tag totals from legacy segments once."""
+        if not self._device_id:
+            # The constructor rejects this, but keep the backfill defensive: it
+            # writes, so an empty key here would duplicate the day's totals.
+            return
         today = date.today().isoformat()
         existing = conn.execute(
             "SELECT 1 FROM tag_time_records WHERE device_id = ? AND date = ? LIMIT 1",

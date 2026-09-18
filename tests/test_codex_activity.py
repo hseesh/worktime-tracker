@@ -21,7 +21,7 @@ class TestCodexActivity(unittest.TestCase):
         self._db_path = tempfile.mktemp(suffix=".db")
         config.DB_FILE = Path(self._db_path)
         time_recorder_module.DB_FILE = config.DB_FILE
-        self.recorder = TimeRecorder()
+        self.recorder = TimeRecorder(device_id="test")
         self.manager = CodexActivityManager(
             self.recorder,
             indie_keywords=["P1-c", "Assets"],

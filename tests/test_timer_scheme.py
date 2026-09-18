@@ -30,7 +30,7 @@ class TestTimerScheme(unittest.TestCase):
         config.CONFIG_FILE = config.CONFIG_DIR / "config.json"
         config.DB_FILE = Path(self._db_path)
         time_recorder_module.DB_FILE = config.DB_FILE
-        self.recorder = TimeRecorder()
+        self.recorder = TimeRecorder(device_id="test")
 
     def tearDown(self):
         for path in (self._db_path, self._csv_path):

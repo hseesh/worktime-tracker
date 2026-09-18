@@ -54,7 +54,7 @@ class TestWebConsistency(unittest.TestCase):
         config.DB_FILE = Path(self._db_path)
         time_recorder_module.DB_FILE = config.DB_FILE
         web_server_module.DB_FILE = config.DB_FILE
-        self.recorder = TimeRecorder()
+        self.recorder = TimeRecorder(device_id="test")
         self.manager = CodexActivityManager(self.recorder)
         self.config = _FakeConfig()
         self.server = WebServer(

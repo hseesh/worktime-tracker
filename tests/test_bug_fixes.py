@@ -61,7 +61,7 @@ class TestBugFixes(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             time_recorder_module.DB_FILE = Path(temp_dir) / "worktime.db"
             try:
-                recorder = TimeRecorder()
+                recorder = TimeRecorder(device_id="test")
                 with patch("tracker.time_recorder.datetime", FixedDateTime):
                     recorder.add_time("app.exe", "App", 4, tag="Work")
 

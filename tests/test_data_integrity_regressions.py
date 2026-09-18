@@ -379,6 +379,22 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         self.assertEqual(result[first_day.isoformat()]["codex"]["sessions"], 1)
         self.assertEqual(result[second_day.isoformat()]["codex"]["sessions"], 1)
 
+    def test_recorder_requires_a_device_id(self):
+        """An empty device_id must not be able to duplicate the day's totals.
+
+        ``_init_db`` backfills today's tag totals under whatever id the recorder
+        holds, so allowing the default "" let a caller who forgot the argument
+        write a second copy of the day under an empty device key.
+        """
+        with self.assertRaises(ValueError):
+            TimeRecorder(device_id="")
+
+        self.recorder.add_time("x.exe", "X", 10, "", "Work")
+        blank = self.recorder._conn().execute(
+            "SELECT COUNT(*) FROM tag_time_records WHERE device_id = ''"
+        ).fetchone()[0]
+        self.assertEqual(blank, 0)
+
     def test_all_history_uses_cloud_only_dates(self):
         old_date = (date.today() - timedelta(days=100)).isoformat()
         self.recorder.upsert_cloud_time_record({
