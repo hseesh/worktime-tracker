@@ -438,39 +438,48 @@ class TimeRecorder:
 
     @staticmethod
     def _migrate_tag_from_display_name(conn):
-        """Parse (Indie)/(Work) suffix from display_name into tag column, then strip suffix."""
-        # Only migrate rows where tag is still 'Other' but display_name has a suffix
+        """Fold a legacy ``(Indie)``/``(Work)`` display-name suffix into ``tag``.
+
+        Early builds encoded the tag inside the display name, and the rewrite is
+        destructive and irreversible. It therefore runs **once per database**,
+        recorded in ``cache_scan_state``, rather than on every startup: after the
+        first pass there is nothing legacy left to find, and re-running it can
+        only ever damage a live name that happens to end with the same text
+        (``Devin (Indie)``), which no pattern can tell apart from the real thing.
+
+        Matching is anchored on the end of the name — the previous
+        ``REPLACE(...)`` rewrote the substring wherever it appeared.
+        """
+        done = conn.execute(
+            "SELECT 1 FROM cache_scan_state WHERE kind = 'migration' "
+            "AND date = 'tag_from_display_name' LIMIT 1"
+        ).fetchone()
+        if done:
+            return
+
+        # Tag column: only rows still carrying the placeholder tag.
         conn.execute(
-            "UPDATE time_records SET tag = 'Indie' WHERE display_name LIKE '%(Indie)' AND tag = 'Other'"
+            "UPDATE time_records SET tag = 'Indie' "
+            "WHERE tag = 'Other' AND display_name LIKE '% (Indie)'"
         )
         conn.execute(
-            "UPDATE time_records SET tag = 'Work' WHERE display_name LIKE '%(Work)' AND tag = 'Other'"
+            "UPDATE time_records SET tag = 'Work' "
+            "WHERE tag = 'Other' AND display_name LIKE '% (Work)'"
         )
+        # Strip the trailing suffix; the cut length equals the suffix length.
+        for suffix in (" (Indie)", " (Work)"):
+            conn.execute(
+                "UPDATE time_records "
+                "SET display_name = substr(display_name, 1, length(display_name) - ?) "
+                "WHERE display_name LIKE ?",
+                (len(suffix), "%" + suffix),
+            )
         conn.execute(
-            "UPDATE time_records SET tag = 'Other' WHERE display_name LIKE '%(Other)' AND tag = 'Other'"
+            "INSERT OR REPLACE INTO cache_scan_state "
+            "(device_id, kind, date, updated_at) VALUES ('', 'migration', "
+            "'tag_from_display_name', ?)",
+            (datetime.now().isoformat(timespec="seconds"),),
         )
-        # Strip suffixes from display_name
-        conn.execute(
-            "UPDATE time_records SET display_name = REPLACE(display_name, ' (Indie)', '') WHERE display_name LIKE '%(Indie)'"
-        )
-        conn.execute(
-            "UPDATE time_records SET display_name = REPLACE(display_name, ' (Work)', '') WHERE display_name LIKE '%(Work)'"
-        )
-        conn.execute(
-            "UPDATE time_records SET display_name = REPLACE(display_name, ' (Other)', '') WHERE display_name LIKE '%(Other)'"
-        )
-        # Strip 'Other (xxx.exe)' prefix format -> just 'xxx.exe'
-        rows = conn.execute(
-            "SELECT DISTINCT display_name FROM time_records WHERE display_name LIKE 'Other (%'"
-        ).fetchall()
-        for row in rows:
-            old_name = row["display_name"]
-            if old_name.startswith("Other (") and old_name.endswith(")"):
-                new_name = old_name[7:-1]  # Remove 'Other (' prefix and ')' suffix
-                conn.execute(
-                    "UPDATE time_records SET display_name = ? WHERE display_name = ?",
-                    (new_name, old_name),
-                )
 
     @staticmethod
     def _conn() -> sqlite3.Connection:
@@ -854,7 +863,12 @@ class TimeRecorder:
         return row["date"] if row and row["date"] else None
 
     def get_daily_totals(self, start: date, end: date) -> List[Tuple[str, float]]:
-        """Return [(date_iso, total_seconds)] for each day in range."""
+        """Return [(date_iso, total_seconds)] for each day in range.
+
+        ``time_segments`` is pruned by :meth:`cleanup_old_time_segments`, so for
+        days older than the retention window it is summed from ``time_records``,
+        which is kept indefinitely and already carries the per-day totals.
+        """
         conn = self._conn()
         try:
             rows = conn.execute(
@@ -867,9 +881,26 @@ class TimeRecorder:
                 """,
                 (start.isoformat(), end.isoformat()),
             ).fetchall()
+            fallback = conn.execute(
+                """
+                SELECT date, SUM(seconds) AS total
+                FROM time_records
+                WHERE date >= ? AND date <= ? AND tag != 'Idle'
+                  AND date NOT IN (
+                      SELECT DISTINCT date FROM time_segments
+                      WHERE date >= ? AND date <= ?
+                  )
+                GROUP BY date
+                ORDER BY date
+                """,
+                (start.isoformat(), end.isoformat(), start.isoformat(), end.isoformat()),
+            ).fetchall()
         finally:
             conn.close()
-        return [(r["date"], r["total"]) for r in rows]
+        merged = {r["date"]: r["total"] for r in fallback}
+        for r in rows:
+            merged[r["date"]] = r["total"]
+        return [(d, merged[d]) for d in sorted(merged)]
 
     def get_daily_tag_breakdown(self, start: date, end: date) -> Dict[str, Dict[str, float]]:
         """Return de-duplicated {date_iso: {tag: seconds}} for [start, end].
@@ -1925,16 +1956,38 @@ class TimeRecorder:
         num_days = max(1, (end - start).days + 1)
         return [{"hour": h, "avg_seconds": round(hour_totals.get(h, 0) / num_days, 1)} for h in range(24)]
 
+    def _range_tag_rows(self, conn, start: date, end: date) -> List:
+        """Per-day tag seconds for [start, end], surviving the segment cleanup.
+
+        ``time_segments`` is pruned after ~30 days, so any day it no longer
+        covers is taken from ``time_records`` instead. Without this, the daily
+        and period views returned nothing for older days while the tag/app
+        breakdowns still showed them.
+        """
+        args = (start.isoformat(), end.isoformat())
+        rows = conn.execute(
+            "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments "
+            "WHERE date >= ? AND date <= ? AND tag != 'Idle' "
+            "GROUP BY date, tag ORDER BY date",
+            args,
+        ).fetchall()
+        fallback = conn.execute(
+            "SELECT date, tag, SUM(seconds) AS seconds FROM time_records "
+            "WHERE date >= ? AND date <= ? AND tag != 'Idle' "
+            "AND date NOT IN ("
+            "    SELECT DISTINCT date FROM time_segments WHERE date >= ? AND date <= ?"
+            ") GROUP BY date, tag ORDER BY date",
+            args + args,
+        ).fetchall()
+        return [*rows, *fallback]
+
     def get_period_tag_summary(self, start: date, end: date, group_by: str = "week") -> List[Dict]:
         """Return [{period, tag, seconds}] grouped by week or month.
         group_by: 'week' (ISO week) or 'month'.
         """
         conn = self._conn()
         try:
-            rows = conn.execute(
-                "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments WHERE date >= ? AND date <= ? AND tag != 'Idle' GROUP BY date, tag ORDER BY date",
-                (start.isoformat(), end.isoformat()),
-            ).fetchall()
+            rows = self._range_tag_rows(conn, start, end)
         finally:
             conn.close()
 
@@ -1958,10 +2011,7 @@ class TimeRecorder:
         """Return [{date, tag, seconds}] for each day and tag in range."""
         conn = self._conn()
         try:
-            rows = conn.execute(
-                "SELECT date, tag, SUM(seconds) AS seconds FROM time_segments WHERE date >= ? AND date <= ? AND tag != 'Idle' GROUP BY date, tag ORDER BY date",
-                (start.isoformat(), end.isoformat()),
-            ).fetchall()
+            rows = self._range_tag_rows(conn, start, end)
         finally:
             conn.close()
         return [dict(r) for r in rows]

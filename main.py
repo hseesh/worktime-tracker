@@ -4,9 +4,11 @@ Run:  python main.py
 """
 
 import logging
+import logging.handlers
 import sys
 import threading
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from config import AppConfig
 from tracker.chrome_url_cache import ChromeUrlCache
@@ -19,11 +21,41 @@ from tracker.time_recorder import TimeRecorder
 from tracker.tracking_engine import TrackingEngine
 from web.server import WebServer, HOST as WEB_HOST, PORT as WEB_PORT
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("worktime-tracker")
+# The app is normally launched with pythonw.exe, which discards stderr — so
+# logging only to the console meant a crash or a background-thread traceback
+# left no trace at all. Everything goes to a rotating file as well.
+LOG_FILE = Path(__file__).resolve().parent / "logs" / "tracker.log"
+LOG_MAX_BYTES = 2 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+
+def _setup_logging() -> logging.Logger:
+    """Log to stderr and to a rotating file next to the app."""
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    stream = logging.StreamHandler(sys.stderr)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except OSError as e:
+        # A read-only or missing directory must not stop the tracker.
+        logging.getLogger("worktime-tracker").warning(
+            "File logging disabled (%s): %s", LOG_FILE, e
+        )
+    return logging.getLogger("worktime-tracker")
+
+
+logger = _setup_logging()
 
 # How often today's dashboard caches (AI tokens, tool calls, Devin activity)
 # are refreshed from the source files. The dashboard reads those cached rows
@@ -63,7 +95,29 @@ def _create_tray_icon():
     return icon
 
 
+def _install_excepthook():
+    """Record uncaught exceptions, which pythonw.exe would otherwise swallow.
+
+    Background threads are the risky case: an exception there ends that thread
+    silently and the tracker keeps running with one of its loops dead.
+    """
+    def _hook(exc_type, exc_value, exc_tb):
+        logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    sys.excepthook = _hook
+
+    def _thread_hook(args):
+        logger.critical(
+            "Uncaught exception in thread %s",
+            args.thread.name if args.thread else "?",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _thread_hook
+
+
 def main():
+    _install_excepthook()
     instance_guard = SingleInstanceGuard()
     if not instance_guard.acquire():
         logger.info("WorkTime Tracker is already running; exiting duplicate startup.")

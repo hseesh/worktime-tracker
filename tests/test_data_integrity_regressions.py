@@ -404,6 +404,62 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         })
         self.assertEqual(self.recorder.get_first_record_date(), old_date)
 
+    def test_display_name_migration_does_not_rewrite_live_names(self):
+        """The one-time suffix migration must not damage a name containing the text.
+
+        It runs on every startup and its rewrite is irreversible, so a live name
+        ending with "(Indie)" is indistinguishable from the legacy encoding by
+        pattern alone — the migration may only ever run once per database.
+        """
+        self.recorder.add_time("app.exe", "Devin (Indie)", 10, "", "Indie")
+        self.recorder.add_time("tool.exe", "Editor (Other)", 10, "", "Other")
+
+        conn = self.recorder._conn()
+        try:
+            TimeRecorder._migrate_tag_from_display_name(conn)
+            conn.commit()
+            names = {
+                r["display_name"]
+                for r in conn.execute("SELECT display_name FROM time_records")
+            }
+        finally:
+            conn.close()
+
+        self.assertIn("Devin (Indie)", names)
+        self.assertIn("Editor (Other)", names)
+
+    def test_daily_totals_survive_segment_cleanup(self):
+        """Days whose segments were pruned must still report their totals.
+
+        ``cleanup_old_time_segments`` deletes ``time_segments`` after ~30 days,
+        but the daily/period views read that table — so older days vanished
+        while the tag and app breakdowns still showed them.
+        """
+        old = (date.today() - timedelta(days=90)).isoformat()
+        self.recorder.upsert_cloud_time_record({
+            "device_id": self.recorder._device_id, "date": old,
+            "process_name": "x.exe", "display_name": "X", "project": "",
+            "tag": "Work", "seconds": 3600, "updated_at": "2026-01-01T00:00:00",
+        })
+        # Simulate the cleanup: no segments at all for that day.
+        conn = self.recorder._conn()
+        try:
+            conn.execute("DELETE FROM time_segments WHERE date = ?", (old,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        start = date.fromisoformat(old)
+        totals = dict(self.recorder.get_daily_totals(start, start))
+        self.assertAlmostEqual(totals.get(old, 0), 3600)
+
+        trend = self.recorder.get_daily_tag_trend(start, start)
+        self.assertEqual([(r["date"], r["tag"], r["seconds"]) for r in trend],
+                         [(old, "Work", 3600)])
+
+        periods = self.recorder.get_period_tag_summary(start, start, group_by="month")
+        self.assertEqual(periods[0]["seconds"], 3600)
+
     def test_tag_totals_are_scoped_to_this_device(self):
         """A cloud-pulled snapshot of the same day must not be added to the live row.
 

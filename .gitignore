@@ -7,8 +7,13 @@ data/
 *.db-shm
 *.db-wal
 
+# Runtime logs (rotating, written next to the app)
+logs/
+*.log
+
 # Local config with sensitive keys
 config.json
+config.json.bak*
 
 # Debug / utility scripts (not part of the app)
 check_db.py
