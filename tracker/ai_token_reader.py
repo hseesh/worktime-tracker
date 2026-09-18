@@ -504,29 +504,43 @@ def read_all_daily_tool_calls(
         except (json.JSONDecodeError, ValueError, SyntaxError, TypeError):
             return
 
-    # Devin: one joined query instead of one database scan per date.
+    # Devin: resolve the day's sessions first, then fetch only their tool calls.
     if _DEVIN_DB.exists():
         try:
             con = sqlite3.connect(f"file:{_DEVIN_DB}?mode=ro", uri=True)
             try:
-                sql = (
-                    "SELECT s.created_at, t.tool_call_json FROM tool_call_state t "
-                    "JOIN sessions s ON s.id = t.session_id"
-                )
+                # ``sessions`` is small and its primary key can drive the join.
+                # Filtering on ``s.created_at`` in a single joined query instead
+                # makes SQLite plan ``SCAN t`` over every ``tool_call_state``
+                # row — 46k rows holding ~340 MB of JSON blobs on a 2.6 GB
+                # database — and re-read them from disk on every refresh just to
+                # count one day.
+                session_sql = "SELECT id, created_at FROM sessions"
                 params = []
                 clauses = []
                 if start_date:
                     start_ts, _ = _local_day_epoch_range(date.fromisoformat(start_date))
-                    clauses.append("s.created_at >= ?")
+                    clauses.append("created_at >= ?")
                     params.append(start_ts)
                 if end_date:
                     _, end_ts = _local_day_epoch_range(date.fromisoformat(end_date))
-                    clauses.append("s.created_at < ?")
+                    clauses.append("created_at < ?")
                     params.append(end_ts)
                 if clauses:
-                    sql += " WHERE " + " AND ".join(clauses)
-                for created_at, raw_json in con.execute(sql, params):
-                    add_devin(_ts_to_date(created_at) or "", raw_json)
+                    session_sql += " WHERE " + " AND ".join(clauses)
+
+                id_to_date = {
+                    sid: _ts_to_date(created_at) or ""
+                    for sid, created_at in con.execute(session_sql, params)
+                }
+                if id_to_date:
+                    placeholders = ",".join("?" * len(id_to_date))
+                    for session_id, raw_json in con.execute(
+                        "SELECT session_id, tool_call_json FROM tool_call_state "
+                        f"WHERE session_id IN ({placeholders})",
+                        list(id_to_date),
+                    ):
+                        add_devin(id_to_date.get(session_id, ""), raw_json)
             finally:
                 con.close()
         except sqlite3.Error as e:

@@ -665,7 +665,6 @@ class TimeRecorder:
                     DO UPDATE SET
                         seconds    = seconds + excluded.seconds,
                         display_name = excluded.display_name,
-                        tag         = excluded.tag,
                         updated_at = excluded.updated_at
                     """,
                     (self._device_id, chunk_date, process_name, display_name, project, tag, chunk_seconds, end_iso),
@@ -1093,7 +1092,6 @@ class TimeRecorder:
                     DO UPDATE SET
                         seconds    = seconds + excluded.seconds,
                         display_name = excluded.display_name,
-                        tag         = excluded.tag,
                         updated_at = excluded.updated_at
                     """,
                     (self._device_id, chunk_date, "codex.exe", project_name, project, tag, chunk_seconds, end_iso),
@@ -1755,17 +1753,28 @@ class TimeRecorder:
         return result
 
     def get_today_tag_distribution(self, target_date: str = None) -> List[Dict]:
-        """Return active tag totals with overlap removed within each tag."""
+        """Return this device's active tag totals with overlap removed within each tag.
+
+        ``tag_time_records`` is keyed by ``(device_id, date, tag)``, so the same
+        day and tag legitimately holds one row per device. The totals must be
+        scoped to *this* device: every cloud-pulled snapshot of the same day
+        would otherwise be added on top of the live local row and roughly
+        double the dashboard headline. Sibling readers
+        (:meth:`get_local_tag_time_records_for_sync`,
+        :meth:`_migrate_current_tag_totals`) scope the same way.
+        """
         today = target_date or date.today().isoformat()
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT tag, SUM(seconds) AS seconds FROM tag_time_records WHERE date = ? GROUP BY tag ORDER BY seconds DESC",
-                (today,),
+                "SELECT tag, SUM(seconds) AS seconds FROM tag_time_records "
+                "WHERE device_id = ? AND date = ? GROUP BY tag ORDER BY seconds DESC",
+                (self._device_id, today),
             ).fetchall()
             if not rows:
                 rows = conn.execute(
-                    "SELECT tag, SUM(seconds) AS seconds FROM time_segments WHERE date = ? AND tag != 'Idle' GROUP BY tag ORDER BY seconds DESC",
+                    "SELECT tag, SUM(seconds) AS seconds FROM time_segments "
+                    "WHERE date = ? AND tag != 'Idle' GROUP BY tag ORDER BY seconds DESC",
                     (today,),
                 ).fetchall()
         finally:

@@ -25,7 +25,8 @@
     "wps.exe": "Other (wps.exe)",
     "哔哩哔哩.exe": "Other (哔哩哔哩.exe)",
     "Qoder.exe": "Other (Qoder.exe)",
-    "WorkBuddyAI.exe": "Other (WorkBuddyAI.exe)"
+    "WorkBuddyAI.exe": "Other (WorkBuddyAI.exe)",
+    "Photoshop.exe": "Photoshop.exe"
   },
   "idle_threshold": 300,
   "poll_interval": 1000,
@@ -182,6 +183,10 @@
         "tag": "Indie"
       },
       {
+        "keyword": "DSH Local Build",
+        "tag": "Indie"
+      },
+      {
         "keyword": "教务系统",
         "tag": "Work"
       },
@@ -310,6 +315,9 @@
     },
     "workbuddyai.exe": {
       "display:other (workbuddyai.exe)": "Indie"
+    },
+    "photoshop.exe": {
+      "display:photoshop.exe": "Indie"
     }
   },
   "url_tag_rules": {

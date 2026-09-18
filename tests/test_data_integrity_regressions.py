@@ -388,6 +388,111 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         })
         self.assertEqual(self.recorder.get_first_record_date(), old_date)
 
+    def test_tag_totals_are_scoped_to_this_device(self):
+        """A cloud-pulled snapshot of the same day must not be added to the live row.
+
+        ``tag_time_records`` is keyed by (device_id, date, tag), so the same day
+        holds one row per device. Summing across devices doubled every headline
+        number on a synced setup.
+        """
+        self.recorder.add_time("x.exe", "X", 10, "", "Work")
+        self.recorder.upsert_cloud_tag_time_record({
+            "device_id": "remote", "date": date.today().isoformat(), "tag": "Work",
+            "seconds": 3600, "updated_at": "2026-01-01T00:00:00",
+        })
+
+        tags = {row["tag"]: row["seconds"] for row in self.recorder.get_today_tag_distribution()}
+        self.assertAlmostEqual(tags["Work"], 10)
+        self.assertAlmostEqual(self.recorder.get_today_live_totals()["total"], 10)
+
+    def test_repeated_add_time_keeps_first_tag(self):
+        """Adding a second sample under a different tag keeps the recorded total.
+
+        The conflict key omits ``tag``, so ``DO UPDATE SET tag = excluded.tag``
+        used to re-attribute every accumulated second to the newest tag.
+        """
+        self.recorder.add_time("chrome.exe", "Chrome", 10, "", "Work")
+        self.recorder.add_time("chrome.exe", "Chrome", 5, "", "Indie")
+
+        apps = self.recorder.get_today_app_breakdown()
+        chrome = next(r for r in apps if r["process_name"] == "chrome.exe")
+        tags = {row["tag"]: row["seconds"] for row in self.recorder.get_today_tag_distribution()}
+        self.assertAlmostEqual(chrome["seconds"], 15)
+        self.assertAlmostEqual(tags["Work"], 10)
+        self.assertAlmostEqual(tags["Indie"], 5)
+
+    def test_devin_tool_calls_filter_sessions_before_reading_blobs(self):
+        """Only the requested day's tool calls are read, without a full table scan.
+
+        The joined query planned ``SCAN tool_call_state`` and re-read ~340 MB of
+        JSON blobs per refresh; the day's sessions must drive the lookup.
+        """
+        statements = []
+        real_connect = sqlite3.connect
+
+        class _TracingConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                statements.append(" ".join(sql.split()))
+                return super().execute(sql, *args)
+
+        def tracing_connect(*args, **kwargs):
+            kwargs["factory"] = _TracingConnection
+            return real_connect(*args, **kwargs)
+
+        devin_db = Path(tempfile.mktemp(suffix=".db"))
+        con = real_connect(str(devin_db))
+        con.executescript(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, created_at REAL);"
+            "CREATE TABLE tool_call_state (session_id TEXT, tool_call_id TEXT,"
+            " tool_call_json TEXT, PRIMARY KEY (session_id, tool_call_id));"
+        )
+        today_ts = datetime.combine(date.today(), time(12, 0)).timestamp()
+        yesterday_ts = today_ts - 86400
+        con.execute("INSERT INTO sessions VALUES ('today', ?)", (today_ts,))
+        con.execute("INSERT INTO sessions VALUES ('old', ?)", (yesterday_ts,))
+        con.execute(
+            "INSERT INTO tool_call_state VALUES ('today', 'c1', ?)",
+            (json.dumps({
+                "_meta": repr({"cognition.ai/inferenceToolName": "mcp_call_tool"}),
+                "title": "Calling mysql_query from mysql",
+            }),),
+        )
+        con.execute(
+            "INSERT INTO tool_call_state VALUES ('old', 'c2', ?)",
+            (json.dumps({
+                "_meta": repr({"cognition.ai/inferenceToolName": "mcp_call_tool"}),
+                "title": "Calling old_tool from oldserver",
+            }),),
+        )
+        con.commit()
+        con.close()
+
+        old_db = ai_reader._DEVIN_DB
+        ai_reader._DEVIN_DB = devin_db
+        try:
+            with patch.object(sqlite3, "connect", tracing_connect):
+                result = ai_reader.read_all_daily_tool_calls(
+                    date.today().isoformat(), date.today().isoformat()
+                )
+        finally:
+            ai_reader._DEVIN_DB = old_db
+            try:
+                os.unlink(devin_db)
+            except OSError:
+                pass
+
+        self.assertEqual(result[date.today().isoformat()]["mcp"], {"mysql.mysql_query": 1})
+        # The blob fetch must be constrained to the day's sessions...
+        self.assertTrue(
+            any("tool_call_state" in s and "session_id IN" in s for s in statements),
+            statements,
+        )
+        # ...and must not join sessions so that the plan degrades to a full scan.
+        self.assertFalse(
+            any("JOIN sessions" in s and "tool_call_state" in s for s in statements),
+            statements,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
