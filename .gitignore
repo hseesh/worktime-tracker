@@ -6,6 +6,7 @@ data/
 *.db
 *.db-shm
 *.db-wal
+*.db.bak
 
 # Runtime logs (rotating, written next to the app)
 logs/

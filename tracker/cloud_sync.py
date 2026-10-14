@@ -5,7 +5,7 @@ all devices' data back, merging into local SQLite. Runs at startup and every
 30 minutes while enabled.
 
 Design:
-- Uses the publishable (anon) key — safe to embed in a desktop app.
+- Uses the publishable (anon) key - safe to embed in a desktop app.
 - RLS allows the anon role full access (see schema_supabase.sql).
 - Syncs time, tag, AI token and tool-call daily aggregates.
 - Does NOT sync time_segments (per-second data, too large for 500MB free tier).
@@ -18,7 +18,7 @@ Design:
 import logging
 import threading
 from datetime import date
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
@@ -256,13 +256,33 @@ class CloudSync:
     # ------------------------------------------------------------------ #
 
     def _pull(self):
-        """Pull all devices' data for date <= today and merge into local SQLite."""
+        """Pull all devices' data for date <= today and merge into local SQLite.
+
+        Every table is attempted. A failure on one table is recorded but does
+        not stop the others: without this, a single oversized table (e.g.
+        ``time_records``, which is the first to exceed one page) would silently
+        starve tool calls and devin activity pulls. The collected failures are
+        raised at the end so the caller still sees the sync as failed and does
+        not mark the day as synced.
+        """
         today = date.today().isoformat()
-        self._pull_tag_time_records(today)
-        self._pull_time_records(today)
-        self._pull_ai_token_daily(today)
-        self._pull_tool_call_daily(today)
-        self._pull_devin_activity_daily(today)
+        failures = []
+        for name, pull_one in (
+            ("tag_time_records", self._pull_tag_time_records),
+            ("time_records", self._pull_time_records),
+            ("ai_token_daily", self._pull_ai_token_daily),
+            ("tool_call_daily", self._pull_tool_call_daily),
+            ("devin_activity_daily", self._pull_devin_activity_daily),
+        ):
+            try:
+                pull_one(today)
+            except Exception as e:
+                logger.error("Failed to pull %s: %s", name, e, exc_info=True)
+                failures.append(name)
+        if failures:
+            raise RuntimeError(
+                f"Supabase pull failed for: {', '.join(failures)}"
+            )
 
     def _pull_tag_time_records(self, include_date: str):
         rows = self._fetch_cloud(
@@ -340,14 +360,23 @@ class CloudSync:
         logger.info("Pulled and merged %d devin_activity_daily rows.", len(rows))
 
     def _fetch_cloud(self, table: str, select: str, lte_date: str) -> List[Dict]:
-        """Fetch rows from a Supabase table where date <= lte_date.
+        """Fetch every row from a Supabase table where date <= lte_date.
 
-        Supabase REST API returns paginated results. We follow the
-        Pagination-Range / Link header or use limit + offset.
+        Supabase REST responds with **HTTP 206 Partial Content** when the result
+        set is larger than the page (``Content-Range: 0-999/1724``), alongside
+        the requested page. A 206 is a normal, complete response here - only the
+        offset window is partial - so it must be accepted. Rejecting it raised
+        out of ``_pull`` and aborted the whole sync, which silently stopped
+        every later table from being pulled (leaving the other devices' time
+        records unsynced).
+
+        The total from ``Content-Range`` drives the loop, so a shorter page
+        never ends pagination while rows are still outstanding.
         """
         all_rows: List[Dict] = []
         limit = 1000
         offset = 0
+        total: Optional[int] = None
 
         while True:
             url = f"{self._url}{REST_BASE}/{table}"
@@ -358,22 +387,49 @@ class CloudSync:
                 "offset": offset,
             }
             headers = self._headers()
-            # Request count to know when to stop
             headers["Prefer"] = "count=exact"
 
             resp = requests.get(url, params=params, headers=headers, timeout=30)
-            if resp.status_code != 200:
+            # 206 means "this page is partial content", which is exactly what
+            # pagination asks for; anything else is a real failure.
+            if resp.status_code not in (200, 206):
                 raise RuntimeError(
                     f"Supabase fetch from {table} failed: "
                     f"HTTP {resp.status_code} {resp.text[:200]}"
                 )
 
             batch = resp.json()
-            if not batch:
-                break
             all_rows.extend(batch)
-            if len(batch) < limit:
+            if total is None:
+                total = self._content_range_total(resp.headers.get("Content-Range"))
+            if total is not None:
+                if len(all_rows) >= total:
+                    break
+            elif len(batch) < limit:
+                # No count offered (Prefer ignored): fall back to a short page.
                 break
             offset += limit
 
+        if total is not None and len(all_rows) < total:
+            logger.warning(
+                "%s: server reported %d rows, fetched %d.", table, total, len(all_rows)
+            )
+        if total is not None and len(all_rows) > total:
+            logger.warning(
+                "%s: fetched %d rows for %d reported; table grew during pagination.",
+                table, len(all_rows), total,
+            )
         return all_rows
+
+    @staticmethod
+    def _content_range_total(header: Optional[str]) -> Optional[int]:
+        """Read the row count from ``Content-Range: 0-999/1724``.
+
+        Returns None when the server reports no count (``*``, as it does for an
+        empty table), so the caller falls back to short-page detection.
+        """
+        if not header:
+            return None
+        _, _, total = header.rpartition("/")
+        total = total.strip()
+        return int(total) if total.isdigit() else None
