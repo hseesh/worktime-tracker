@@ -11,6 +11,7 @@ All reads are read-only and never modify the source databases/files.
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,30 @@ _DEVIN_DB = _HOME / "AppData" / "Roaming" / "devin" / "cli" / "sessions.db"
 _CODEX_SESSIONS_DIR = _HOME / ".codex" / "sessions"
 _CODEX_ARCHIVED_DIR = _HOME / ".codex" / "archived_sessions"
 _WORKBUDDY_PROJECTS_DIR = _HOME / ".workbuddy-ai" / "projects"
+
+# BYOK (bring-your-own-key) model keys wrap the real model name in routing
+# metadata: dfbyok-provider-<provider uuid>-<model>-<hex>
+_BYOK_KEY_RE = re.compile(
+    r"^dfbyok-provider-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]+-(?P<model>[a-z0-9][a-z0-9.\-]*?)-[0-9a-f]{16}$"
+)
+
+
+def _byok_model_name(model: str) -> Optional[str]:
+    """Extract the model name from a Devin BYOK model key, else ``None``.
+
+    ``dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-step-5-preview-717909e2b6f8fc6e``
+    becomes ``step-5-preview``.  The uuid identifies the configured BYOK
+    credential and the trailing hex is its routing hash, so both are dropped as
+    noise rather than reported as part of the model name.
+    """
+    if not model or not model.startswith("dfbyok-provider-"):
+        return None
+    m = _BYOK_KEY_RE.match(model)
+    if m and m.group("model"):
+        return m.group("model")
+    # Unknown BYOK shape: keep the raw key so the row is still visible.
+    return model
 
 
 def _extract_devin_dims(meta_json: str) -> Optional[Dict]:
@@ -928,18 +953,26 @@ def read_dsh_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
 
 
 def normalize_token_source(source: str) -> str:
-    """Strip the provider prefix from a source name: ``codebuddy/gpt-5.6-sol`` -> ``gpt-5.6-sol``.
+    """Strip a source name down to the bare model name.
 
-    DSH logs the serving provider next to the model, which splits one model
-    across several rows once the same model is reachable through more than one
-    provider. The dashboard reports token usage per model, so the prefix (and
-    the provider dimension it carries) is dropped and equal model names merge.
+    ``codebuddy/gpt-5.6-sol`` -> ``gpt-5.6-sol`` and
+    ``dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-step-5-preview-717909e2b6f8fc6e``
+    -> ``step-5-preview``.
+
+    The dashboard reports token usage per model.  DSH logs the serving provider
+    next to the model, and Devin's BYOK support wraps the model in a provider
+    uuid plus credential hash; both split one model across several rows once it
+    is reachable through more than one route, so the routing markup is dropped
+    and equal model names merge.
     """
     name = (source or "").strip()
     if "/" in name:
         head, tail = name.split("/", 1)
         if head and tail:
-            return tail
+            name = tail
+    byok = _byok_model_name(name)
+    if byok:
+        return byok
     return name or "unknown"
 
 

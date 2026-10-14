@@ -12,6 +12,7 @@ from unittest.mock import patch
 import config
 import tracker.ai_token_reader as ai_reader
 import tracker.time_recorder as time_recorder_module
+import web.server as web_server_module
 from tracker.time_recorder import TimeRecorder
 
 
@@ -96,6 +97,66 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         self.assertEqual(summary["total_tokens"], 120)
         self.assertEqual(summary["cached_tokens"], 80)
         self.assertEqual(summary["by_source"][0]["tokens"], 120)
+
+    def test_devin_byok_model_key_reports_bare_model(self):
+        """Devin BYOK sessions key the model as dfbyok-provider-<uuid>-<model>-<hash>.
+
+        The uuid and hash identify the BYOK credential, not the model, and would
+        otherwise surface as an unreadable model name in the dashboard.
+        """
+        raw = ("dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-"
+               "step-5-preview-717909e2b6f8fc6e")
+        self.assertEqual(ai_reader.normalize_token_source(raw), "step-5-preview")
+        self.assertEqual(
+            ai_reader.normalize_token_source(
+                "dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-"
+                "deepseek-v4-1-flash-7da1561aef16a0e0"
+            ),
+            "deepseek-v4-1-flash",
+        )
+        # Ordinary models and provider prefixes keep working.
+        self.assertEqual(ai_reader.normalize_token_source("claude-opus-5-5-low"),
+                         "claude-opus-5-5-low")
+        self.assertEqual(ai_reader.normalize_token_source("codebuddy/deepseek-v4.1-flash"),
+                         "deepseek-v4.1-flash")
+        self.assertEqual(ai_reader.normalize_token_source(""), "unknown")
+
+    def test_byok_and_bare_model_rows_merge_instead_of_splitting(self):
+        """One model reached by both routes must be one cache row, not two."""
+        today = date.today().isoformat()
+        byok = ("dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-"
+                "glm-5-3-99b95e38ca06db8b")
+        self.recorder._replace_local_ai_token_date(today, {
+            byok: {"input": 100, "output": 10, "cached": 0, "sessions": 1, "messages": 2},
+            "glm-5-3": {"input": 50, "output": 5, "cached": 0, "sessions": 1, "messages": 1},
+        })
+
+        day = self.recorder.get_local_ai_token_daily(today)
+        self.assertEqual(sorted(day), ["glm-5-3"])
+        entry = day["glm-5-3"]
+        self.assertEqual(entry["input"], 150)
+        self.assertEqual(entry["output"], 15)
+        self.assertEqual(entry["sessions"], 2)
+        self.assertEqual(entry["messages"], 3)
+
+    def test_cached_byok_day_summary_shows_bare_model(self):
+        """The dashboard card must not show the raw BYOK key as the model name."""
+        today = date.today().isoformat()
+        self.recorder.upsert_cloud_ai_token_daily({
+            "device_id": "remote",
+            "date": today,
+            "source": ("dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-"
+                       "step-5-preview-717909e2b6f8fc6e"),
+            "input_tokens": 100, "output_tokens": 10, "cached_tokens": 0,
+            "sessions": 1, "messages": 2, "updated_at": "2026-10-14T00:00:00",
+        })
+
+        summary = web_server_module._summarize_merged_cached_tokens(
+            self.recorder.get_ai_token_daily_range(date.today(), date.today())[today]
+        )
+        sources = [row["source"] for row in summary["by_source"]]
+        self.assertEqual(sources, ["step-5-preview"])
+        self.assertEqual(summary["total_tokens"], 110)
 
     def test_devin_target_date_uses_local_midnight(self):
         with tempfile.TemporaryDirectory() as td:

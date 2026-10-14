@@ -425,12 +425,23 @@ function localDateStr(d) {
     String(d.getDate()).padStart(2, '0');
 }
 
-// Drop the provider prefix from a token source: codebuddy/deepseek-v4.1-flash
-// -> deepseek-v4.1-flash. Keeps one model from being listed per provider.
+// Reduce a token source to the bare model name.
+//   codebuddy/deepseek-v4.1-flash                                  -> deepseek-v4.1-flash
+//   dfbyok-provider-<uuid>-step-5-preview-<hash>                   -> step-5-preview
+// Keeps one model from being listed per provider / BYOK credential.
 function normalizeTokenSource(source) {
   var name = (source || '').trim();
   var slash = name.indexOf('/');
-  if (slash > 0 && slash < name.length - 1) return name.slice(slash + 1);
+  if (slash > 0 && slash < name.length - 1) {
+    name = name.slice(slash + 1);
+  } else {
+    name = name.replace(/^[^/]*\/([^/]+)$/, '$1');
+  }
+  // BYOK: dfbyok-provider-<8-4-4-4-any hex>-<model>-<16 hex>
+  var m = name.match(
+    /^dfbyok-provider-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]+-(.+?)-[0-9a-f]{16}$/
+  );
+  if (m) return m[1];
   return name || 'unknown';
 }
 

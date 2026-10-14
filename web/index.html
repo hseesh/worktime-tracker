@@ -1172,8 +1172,19 @@ createApp({
         'swe-1-7-medium': '#f7768e',
         'gpt-5-6-luna-high': '#9ece6a',
         'gpt-5-6-luna-medium': '#9ece6a',
+        // Hash a palette by the model family so a previously unseen model still
+        // gets a stable, distinct colour instead of the grey default.
       };
-      return colors[source] || '#565f89';
+      if (colors[source]) return colors[source];
+      const family = source.split('-').slice(0, 2).join('-') || source;
+      const byFamily = {
+        'gpt': '#10a37f', 'glm': '#bb9af7', 'kimi': '#7aa2f7',
+        'deepseek': '#e0af68', 'swe': '#f7768e', 'claude': '#ff9e64',
+        'gemini': '#4285f4', 'step': '#e0af68', 'minimax': '#f7768e',
+        'hy': '#9ece6a', 'default-model': '#565f89',
+      };
+      const head = family.split('-')[0];
+      return byFamily[head] || '#565f89';
     }
 
     function heatmapValue(cell) {

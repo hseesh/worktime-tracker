@@ -1340,6 +1340,8 @@ class TimeRecorder:
 
     def _replace_local_ai_token_date(self, d_iso: str, day_data: Dict[str, Dict]):
         """Atomically replace one device-local day so removed sources do not linger."""
+        from tracker.ai_token_reader import normalize_token_source
+
         conn = self._conn()
         try:
             conn.execute(
@@ -1347,16 +1349,28 @@ class TimeRecorder:
                 (self._device_id, d_iso),
             )
             now = datetime.now().isoformat(timespec="seconds")
+            merged: Dict[str, Dict] = {}
             for source, entry in day_data.items():
+                # Store rows under the bare model name so Devin BYOK keys
+                # ("dfbyok-provider-<uuid>-<model>-<hash>") and DSH provider
+                # prefixes cannot split one model across several cache rows and
+                # double-count it on the day summary.
+                acc = merged.setdefault(
+                    normalize_token_source(source),
+                    {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+                )
+                for key in ("input", "output", "cached", "sessions", "messages"):
+                    acc[key] += entry.get(key, 0)
+            for source, entry in merged.items():
                 conn.execute(
                     "INSERT INTO ai_token_daily "
                     "(device_id, date, source, input_tokens, output_tokens, cached_tokens, "
                     "sessions, messages, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         self._device_id, d_iso, source,
-                        entry.get("input", 0), entry.get("output", 0),
-                        entry.get("cached", 0), entry.get("sessions", 0),
-                        entry.get("messages", 0), now,
+                        entry["input"], entry["output"],
+                        entry["cached"], entry["sessions"],
+                        entry["messages"], now,
                     ),
                 )
             conn.execute(
