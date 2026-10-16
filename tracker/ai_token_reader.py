@@ -33,6 +33,12 @@ _BYOK_KEY_RE = re.compile(
     r"[0-9a-f]+-(?P<model>[a-z0-9][a-z0-9.\-]*?)-[0-9a-f]{16}$"
 )
 
+# Model versions are spelled both ways across sources: ``deepseek-v4-1-flash``
+# (Devin) and ``deepseek-v4.1-flash`` (DSH/Codex/WorkBuddy).  Only a dot between
+# digits is a version separator, so a trailing qualifier such as ``-sg`` is left
+# alone.
+_VERSION_SEP_RE = re.compile(r"(?<=\d)\.(?=\d)")
+
 
 def _byok_model_name(model: str) -> Optional[str]:
     """Extract the model name from a Devin BYOK model key, else ``None``.
@@ -74,8 +80,35 @@ def _extract_devin_dims(meta_json: str) -> Optional[Dict]:
     return out if out else None
 
 
-def _read_devin_message_metrics(con: sqlite3.Connection, sid: str) -> Optional[Dict]:
-    """Aggregate per-assistant-message token metrics for one Devin session.
+def _devin_message_local_date(msg_created, node_created) -> Optional[str]:
+    """Resolve one message's local ISO day, preferring its own timestamp.
+
+    ``metadata.created_at`` is an ISO UTC instant written when the message was
+    produced.  ``message_nodes.created_at`` is only a fallback: compaction
+    rewrites every node of a session with a single timestamp, which loses the
+    original message times.
+    """
+    if msg_created:
+        try:
+            parsed = datetime.fromisoformat(str(msg_created).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone().date().isoformat()
+        except (TypeError, ValueError):
+            pass
+    return _ts_to_date(node_created)
+
+
+def _devin_session_columns(con: sqlite3.Connection) -> set:
+    """Return the column names of the Devin ``sessions`` table."""
+    try:
+        return {row[1] for row in con.execute("PRAGMA table_info(sessions)")}
+    except sqlite3.Error:
+        return set()
+
+
+def _read_devin_session_daily(con: sqlite3.Connection, sid: str) -> Optional[Dict[str, Dict]]:
+    """Read one Devin session's usage grouped by each message's local day.
 
     Devin builds from 2026-09-12 (schema v17) no longer write
     ``response_dimensions`` into sessions.metadata; usage is only kept per
@@ -83,13 +116,22 @@ def _read_devin_message_metrics(con: sqlite3.Connection, sid: str) -> Optional[D
     Nodes are grouped by message_id because branching/compaction stores the
     same message multiple times, and summing them would double-count.
 
+    A session can stay open across local midnight, so every message is
+    attributed to the day of its own timestamp rather than to the session's
+    ``created_at`` - otherwise a long-running session reports its entire
+    lifetime on the day it started.
+
     ``cache_creation_tokens`` are new input tokens written to the prompt cache
     (Anthropic-style models report ``input_tokens`` as only the uncached part),
     so they are folded into ``input``.
+
+    Returns ``{date_iso: {"input", "output", "cached", "messages"}}`` or ``None``.
     """
     try:
         rows = con.execute(
-            "SELECT json_extract(chat_message, '$.metadata.metrics') AS metrics "
+            "SELECT json_extract(chat_message, '$.metadata.metrics') AS metrics, "
+            "json_extract(chat_message, '$.metadata.created_at') AS msg_created, "
+            "created_at AS node_created "
             "FROM message_nodes WHERE row_id IN ("
             "SELECT MAX(row_id) FROM message_nodes WHERE session_id = ? "
             "AND json_extract(chat_message, '$.role') = 'assistant' "
@@ -102,18 +144,44 @@ def _read_devin_message_metrics(con: sqlite3.Connection, sid: str) -> Optional[D
         return None
     if not rows:
         return None
-    inp = out = cached = 0
-    for (raw,) in rows:
+    daily: Dict[str, Dict] = {}
+
+    def day_entry(d_iso: str) -> Dict:
+        return daily.setdefault(d_iso, {"input": 0, "output": 0, "cached": 0, "messages": 0})
+
+    for raw, msg_created, node_created in rows:
         try:
             m = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             continue
         if not isinstance(m, dict):
             continue
-        inp += int(m.get("input_tokens", 0) or 0) + int(m.get("cache_creation_tokens", 0) or 0)
-        out += int(m.get("output_tokens", 0) or 0)
-        cached += int(m.get("cache_read_tokens", 0) or 0)
-    return {"input": inp, "output": out, "cached": cached}
+        d_iso = _devin_message_local_date(msg_created, node_created)
+        if not d_iso:
+            continue
+        entry = day_entry(d_iso)
+        entry["input"] += int(m.get("input_tokens", 0) or 0) + int(m.get("cache_creation_tokens", 0) or 0)
+        entry["output"] += int(m.get("output_tokens", 0) or 0)
+        entry["cached"] += int(m.get("cache_read_tokens", 0) or 0)
+    if not daily:
+        return None
+
+    # Count user-sent messages from message_nodes (role=user AND is_user_input=true),
+    # dated by the same per-message rule as the usage above.
+    try:
+        for msg_created, node_created in con.execute(
+            "SELECT json_extract(chat_message, '$.metadata.created_at'), created_at "
+            "FROM message_nodes WHERE session_id = ? "
+            "AND json_extract(chat_message, '$.role') = 'user' "
+            "AND json_extract(chat_message, '$.metadata.is_user_input') = 1",
+            (sid,),
+        ):
+            d_iso = _devin_message_local_date(msg_created, node_created)
+            if d_iso:
+                day_entry(d_iso)["messages"] += 1
+    except sqlite3.Error as e:
+        logger.debug("Failed to count user messages for session %s: %s", sid, e)
+    return daily
 
 
 def _ts_to_date(ts) -> Optional[str]:
@@ -146,14 +214,30 @@ def _event_local_date(obj: Dict, fallback: str = "") -> str:
         return fallback
 
 
+def _count_devin_user_messages(con: sqlite3.Connection, sid: str) -> int:
+    """Count user-sent messages of a session (role=user AND is_user_input=true)."""
+    try:
+        return con.execute(
+            "SELECT COUNT(*) FROM message_nodes WHERE session_id = ? "
+            "AND json_extract(chat_message, '$.role') = 'user' "
+            "AND json_extract(chat_message, '$.metadata.is_user_input') = 1",
+            (sid,),
+        ).fetchone()[0]
+    except sqlite3.Error as e:
+        logger.debug("Failed to count user messages for session %s: %s", sid, e)
+        return 0
+
+
 def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
     """Read Devin token usage grouped by date and model.
 
     Returns:
         {date_iso: {model: {"input": int, "output": int, "cached": int, "sessions": int, "messages": int}}}
 
-    If *target_date* is given, only sessions on that date are returned (faster
-    because we filter in SQL).  Otherwise all sessions are scanned.
+    Usage is attributed to each message's own local day, so a session left open
+    across midnight is split over the days it actually ran.  For *target_date*
+    that means selecting every session overlapping the day, not just the ones
+    created on it.
     """
     if not _DEVIN_DB.exists():
         return {}
@@ -163,63 +247,65 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
     try:
         con = sqlite3.connect(f"file:{_DEVIN_DB}?mode=ro", uri=True)
         cur = con.cursor()
+        columns = _devin_session_columns(con)
+        # Older sessions tables predate last_activity_at; without it the only
+        # available day signal is the creation timestamp.
+        activity_col = "last_activity_at" if "last_activity_at" in columns else "created_at"
+        select = f"SELECT id, model, created_at, metadata, {activity_col} FROM sessions"
         if target_date:
-            # Convert date to unix timestamp range for SQL filtering
+            # A session belongs to the day when it was created *or* when it was
+            # still active; filtering on created_at alone drops every session
+            # that ran across midnight.
             d = date.fromisoformat(target_date)
             start_ts, end_ts = _local_day_epoch_range(d)
             rows = cur.execute(
-                "SELECT id, model, created_at, metadata FROM sessions "
-                "WHERE created_at >= ? AND created_at < ?",
-                (start_ts, end_ts),
+                f"{select} WHERE created_at < ? AND {activity_col} >= ?",
+                (end_ts, start_ts),
             ).fetchall()
         else:
-            rows = cur.execute(
-                "SELECT id, model, created_at, metadata FROM sessions"
-            ).fetchall()
+            rows = cur.execute(select).fetchall()
     except sqlite3.Error as e:
         logger.warning("Failed to read Devin sessions.db: %s", e)
         if con:
             con.close()
         return {}
 
-    for sid, model, created_at, meta in rows:
-        d_iso = _ts_to_date(created_at)
-        if not d_iso:
-            continue
-        if target_date and d_iso != target_date:
-            continue
+    for sid, model, created_at, meta, last_activity in rows:
         dims = _extract_devin_dims(meta)
-        if dims:
-            inp = int(dims.get("input_tokens", 0) or 0)
-            out = int(dims.get("output_tokens", 0) or 0)
-            cached = int(dims.get("cached_input_tokens", 0) or 0)
-        else:
-            # Newer Devin builds stopped writing response_dimensions, so fall
-            # back to the per-message usage metrics.
-            metrics = _read_devin_message_metrics(con, sid)
-            if not metrics:
-                continue
-            inp, out, cached = metrics["input"], metrics["output"], metrics["cached"]
-        # Count user-sent messages from message_nodes (role=user AND is_user_input=true).
-        # Uses idx_message_nodes_session index for fast per-session lookup.
-        user_msgs = 0
-        try:
-            user_msgs = con.execute(
-                "SELECT COUNT(*) FROM message_nodes WHERE session_id = ? "
-                "AND json_extract(chat_message, '$.role') = 'user' "
-                "AND json_extract(chat_message, '$.metadata.is_user_input') = 1",
-                (sid,),
-            ).fetchone()[0]
-        except sqlite3.Error as e:
-            logger.debug("Failed to count user messages for session %s: %s", sid, e)
         mdl = model or "unknown"
-        day = result.setdefault(d_iso, {})
-        entry = day.setdefault(mdl, {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0})
-        entry["input"] += inp
-        entry["output"] += out
-        entry["cached"] += cached
-        entry["sessions"] += 1
-        entry["messages"] += user_msgs
+        if dims:
+            # Legacy sessions carry one cumulative snapshot, not per-message
+            # usage; it can only be attributed to the session's creation day.
+            d_iso = _ts_to_date(created_at)
+            if not d_iso or (target_date and d_iso != target_date):
+                continue
+            user_msgs = _count_devin_user_messages(con, sid)
+            entry = result.setdefault(d_iso, {}).setdefault(
+                mdl, {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0}
+            )
+            entry["input"] += int(dims.get("input_tokens", 0) or 0)
+            entry["output"] += int(dims.get("output_tokens", 0) or 0)
+            entry["cached"] += int(dims.get("cached_input_tokens", 0) or 0)
+            entry["sessions"] += 1
+            entry["messages"] += user_msgs
+            continue
+        # Newer Devin builds stopped writing response_dimensions, so fall back
+        # to the per-message usage metrics, bucketed by message day.
+        daily = _read_devin_session_daily(con, sid)
+        if not daily:
+            continue
+        for d_iso, metrics in daily.items():
+            if target_date and d_iso != target_date:
+                continue
+            entry = result.setdefault(d_iso, {}).setdefault(
+                mdl, {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0}
+            )
+            entry["input"] += metrics["input"]
+            entry["output"] += metrics["output"]
+            entry["cached"] += metrics["cached"]
+            # A session counts once per day it appears on.
+            entry["sessions"] += 1
+            entry["messages"] += metrics["messages"]
     con.close()
     return result
 
@@ -955,7 +1041,7 @@ def read_dsh_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict]:
 def normalize_token_source(source: str) -> str:
     """Strip a source name down to the bare model name.
 
-    ``codebuddy/gpt-5.6-sol`` -> ``gpt-5.6-sol`` and
+    ``codebuddy/gpt-5.6-sol`` -> ``gpt-5-6-sol`` and
     ``dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-step-5-preview-717909e2b6f8fc6e``
     -> ``step-5-preview``.
 
@@ -964,6 +1050,11 @@ def normalize_token_source(source: str) -> str:
     uuid plus credential hash; both split one model across several rows once it
     is reachable through more than one route, so the routing markup is dropped
     and equal model names merge.
+
+    Version separators are also spelled both ways - Devin and its BYOK keys
+    write ``deepseek-v4-1-flash`` while DSH, Codex and WorkBuddy report
+    ``deepseek-v4.1-flash`` - so a dot between digits is folded onto the dash
+    form that the majority of sources already use.
     """
     name = (source or "").strip()
     if "/" in name:
@@ -972,8 +1063,10 @@ def normalize_token_source(source: str) -> str:
             name = tail
     byok = _byok_model_name(name)
     if byok:
-        return byok
-    return name or "unknown"
+        name = byok
+    if not name:
+        return "unknown"
+    return _VERSION_SEP_RE.sub("-", name)
 
 
 def _merge_token_day(dst: Dict[str, Dict], src: Dict[str, Dict]):

@@ -5,7 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -117,9 +117,50 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         # Ordinary models and provider prefixes keep working.
         self.assertEqual(ai_reader.normalize_token_source("claude-opus-5-5-low"),
                          "claude-opus-5-5-low")
+        # Version separators are folded onto the dash form the other sources use.
         self.assertEqual(ai_reader.normalize_token_source("codebuddy/deepseek-v4.1-flash"),
-                         "deepseek-v4.1-flash")
+                         "deepseek-v4-1-flash")
         self.assertEqual(ai_reader.normalize_token_source(""), "unknown")
+
+    def test_version_separator_variants_merge_into_one_row(self):
+        """``deepseek-v4-1-flash`` and ``deepseek-v4.1-flash`` are the same model.
+
+        Devin (and its BYOK keys) spell the version with dashes; DSH, Codex and
+        WorkBuddy spell it with a dot.  Both must land on one dashboard row.
+        """
+        self.assertEqual(ai_reader.normalize_token_source("deepseek-v4.1-flash"),
+                         "deepseek-v4-1-flash")
+        self.assertEqual(
+            ai_reader.normalize_token_source(
+                "dfbyok-provider-86a12f9c-5c8e-48f2-9965-ebbffc7-"
+                "deepseek-v4-1-flash-7da1561aef16a0e0"
+            ),
+            "deepseek-v4-1-flash",
+        )
+        self.assertEqual(ai_reader.normalize_token_source("gpt-6.1-sol"), "gpt-6-1-sol")
+        # Only a dot between digits is a separator; other punctuation is kept.
+        self.assertEqual(ai_reader.normalize_token_source("deepseek-v4.1-flash-sg"),
+                         "deepseek-v4-1-flash-sg")
+        self.assertEqual(ai_reader.normalize_token_source("hy4-preview-f"),
+                         "hy4-preview-f")
+
+    def test_dot_and_dash_rows_merge_in_cached_day(self):
+        """The cache must report one row for both spellings of a model."""
+        today = date.today().isoformat()
+        self.recorder._replace_local_ai_token_date(today, {
+            "deepseek-v4-1-flash": {"input": 100, "output": 10, "cached": 0,
+                                    "sessions": 1, "messages": 2},
+            "deepseek-v4.1-flash": {"input": 50, "output": 5, "cached": 0,
+                                    "sessions": 1, "messages": 1},
+        })
+
+        day = self.recorder.get_local_ai_token_daily(today)
+        self.assertEqual(sorted(day), ["deepseek-v4-1-flash"])
+        entry = day["deepseek-v4-1-flash"]
+        self.assertEqual(entry["input"], 150)
+        self.assertEqual(entry["output"], 15)
+        self.assertEqual(entry["sessions"], 2)
+        self.assertEqual(entry["messages"], 3)
 
     def test_byok_and_bare_model_rows_merge_instead_of_splitting(self):
         """One model reached by both routes must be one cache row, not two."""
@@ -240,6 +281,204 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         self.assertEqual(entry["output"], 17)
         self.assertEqual(entry["cached"], 50)
         self.assertEqual(entry["sessions"], 1)
+
+    def test_devin_session_spanning_midnight_splits_by_message_day(self):
+        """A session left open overnight reports each day's own usage.
+
+        Attribution used to follow the session's created_at, so a session
+        started yesterday and still running today reported its whole lifetime
+        on yesterday and today showed almost nothing.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            source_db = Path(td) / "sessions.db"
+            conn = sqlite3.connect(source_db)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT, model TEXT, created_at INTEGER, "
+                "last_activity_at INTEGER, metadata TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, parent_node_id INTEGER, "
+                "chat_message TEXT, created_at INTEGER, metadata TEXT)"
+            )
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+            created = datetime.combine(yesterday, time(22, 0))
+            # Compaction rewrites every node with one late timestamp, which is
+            # why the message's own metadata.created_at must win.
+            rewritten_at = int(datetime.combine(today, time(9, 0)).timestamp())
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                ("sess-1", "glm-5-2", int(created.timestamp()),
+                 int(datetime.combine(today, time(9, 0)).timestamp()),
+                 json.dumps({"total_credit_cost": 0})),
+            )
+
+            def node(node_id, role, metrics=None, message_id=None, msg_day=None):
+                meta = {"metrics": metrics}
+                if role == "user":
+                    meta["is_user_input"] = 1
+                if msg_day:
+                    # metadata.created_at is UTC; convert a local midday so the
+                    # fixture lands on the intended local day everywhere.
+                    stamp = datetime.combine(msg_day, time(12, 0)).astimezone(timezone.utc)
+                    meta["created_at"] = stamp.isoformat().replace("+00:00", "Z")
+                chat = {"message_id": message_id, "role": role, "metadata": meta}
+                conn.execute(
+                    "INSERT INTO message_nodes (session_id, node_id, parent_node_id, "
+                    "chat_message, created_at, metadata) VALUES (?, ?, ?, ?, ?, NULL)",
+                    ("sess-1", node_id, node_id - 1, json.dumps(chat), rewritten_at),
+                )
+
+            node(0, "user", message_id="u-1", msg_day=yesterday)
+            node(1, "assistant", {"input_tokens": 100, "output_tokens": 10}, "a-1", yesterday)
+            node(2, "user", message_id="u-2", msg_day=today)
+            node(3, "assistant", {"input_tokens": 300, "output_tokens": 30}, "a-2", today)
+            conn.commit()
+            conn.close()
+
+            old_db = ai_reader._DEVIN_DB
+            ai_reader._DEVIN_DB = source_db
+            try:
+                all_days = ai_reader.read_devin_daily_tokens()
+                today_only = ai_reader.read_devin_daily_tokens(today.isoformat())
+            finally:
+                ai_reader._DEVIN_DB = old_db
+
+        y_entry = all_days[yesterday.isoformat()]["glm-5-2"]
+        t_entry = all_days[today.isoformat()]["glm-5-2"]
+        self.assertEqual(y_entry["input"], 100)
+        self.assertEqual(y_entry["output"], 10)
+        self.assertEqual(y_entry["messages"], 1)
+        self.assertEqual(t_entry["input"], 300)
+        self.assertEqual(t_entry["output"], 30)
+        self.assertEqual(t_entry["messages"], 1)
+        # Filtering one day must still pick up the session that outlived it.
+        self.assertEqual(today_only[today.isoformat()]["glm-5-2"]["input"], 300)
+        self.assertNotIn(yesterday.isoformat(), today_only)
+
+    def test_devin_target_date_includes_session_active_that_day(self):
+        """A session created earlier but active on the day is not dropped."""
+        with tempfile.TemporaryDirectory() as td:
+            source_db = Path(td) / "sessions.db"
+            conn = sqlite3.connect(source_db)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT, model TEXT, created_at INTEGER, "
+                "last_activity_at INTEGER, metadata TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, parent_node_id INTEGER, "
+                "chat_message TEXT, created_at INTEGER, metadata TEXT)"
+            )
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                ("sess-1", "glm-5-2", int(datetime.combine(yesterday, time(8, 0)).timestamp()),
+                 int(datetime.combine(today, time(10, 0)).timestamp()),
+                 json.dumps({"total_credit_cost": 0})),
+            )
+            node_ts = int(datetime.combine(today, time(9, 0)).timestamp())
+            chat = {
+                "message_id": "a-1", "role": "assistant",
+                "metadata": {"metrics": {"input_tokens": 42, "output_tokens": 4},
+                             "created_at": datetime.combine(today, time(9, 0)).isoformat() + "Z"},
+            }
+            conn.execute(
+                "INSERT INTO message_nodes (session_id, node_id, parent_node_id, "
+                "chat_message, created_at, metadata) VALUES (?, ?, ?, ?, ?, NULL)",
+                ("sess-1", 1, 0, json.dumps(chat), node_ts),
+            )
+            conn.commit()
+            conn.close()
+
+            old_db = ai_reader._DEVIN_DB
+            ai_reader._DEVIN_DB = source_db
+            try:
+                result = ai_reader.read_devin_daily_tokens(today.isoformat())
+            finally:
+                ai_reader._DEVIN_DB = old_db
+
+        self.assertEqual(result[today.isoformat()]["glm-5-2"]["input"], 42)
+
+    def test_devin_legacy_dimensions_stay_on_creation_day(self):
+        """Legacy response_dimensions are one cumulative snapshot, not per-message."""
+        with tempfile.TemporaryDirectory() as td:
+            source_db = Path(td) / "sessions.db"
+            conn = sqlite3.connect(source_db)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT, model TEXT, created_at INTEGER, "
+                "last_activity_at INTEGER, metadata TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, parent_node_id INTEGER, "
+                "chat_message TEXT, created_at INTEGER, metadata TEXT)"
+            )
+            today = date.today()
+            created = datetime.combine(today, time(9, 0))
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                ("sess-1", "claude-opus-5-5-low", int(created.timestamp()),
+                 int(created.timestamp()) + 3600,
+                 json.dumps({"response_dimensions": [
+                     {"uid": "input_tokens", "kind": {"CumulativeMetric": {"value": 777}}},
+                     {"uid": "output_tokens", "kind": {"CumulativeMetric": {"value": 55}}},
+                 ]})),
+            )
+            conn.commit()
+            conn.close()
+
+            old_db = ai_reader._DEVIN_DB
+            ai_reader._DEVIN_DB = source_db
+            try:
+                result = ai_reader.read_devin_daily_tokens(today.isoformat())
+            finally:
+                ai_reader._DEVIN_DB = old_db
+
+        entry = result[today.isoformat()]["claude-opus-5-5-low"]
+        self.assertEqual(entry["input"], 777)
+        self.assertEqual(entry["output"], 55)
+        self.assertEqual(entry["sessions"], 1)
+
+    def test_devin_session_without_last_activity_column_still_reads(self):
+        """Older sessions tables lack last_activity_at; the reader must cope."""
+        with tempfile.TemporaryDirectory() as td:
+            source_db = Path(td) / "sessions.db"
+            conn = sqlite3.connect(source_db)
+            conn.execute("CREATE TABLE sessions (id TEXT, model TEXT, created_at INTEGER, metadata TEXT)")
+            conn.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, parent_node_id INTEGER, "
+                "chat_message TEXT, created_at INTEGER, metadata TEXT)"
+            )
+            created = int(datetime.combine(date.today(), time(10, 0)).timestamp())
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+                ("sess-1", "glm-5-2", created, json.dumps({"total_credit_cost": 0})),
+            )
+            chat = {
+                "message_id": "a-1", "role": "assistant",
+                "metadata": {"metrics": {"input_tokens": 9, "output_tokens": 1},
+                             "created_at": datetime.combine(date.today(), time(10, 0)).isoformat() + "Z"},
+            }
+            conn.execute(
+                "INSERT INTO message_nodes (session_id, node_id, parent_node_id, "
+                "chat_message, created_at, metadata) VALUES (?, ?, ?, ?, ?, NULL)",
+                ("sess-1", 1, 0, json.dumps(chat), created),
+            )
+            conn.commit()
+            conn.close()
+
+            old_db = ai_reader._DEVIN_DB
+            ai_reader._DEVIN_DB = source_db
+            try:
+                result = ai_reader.read_devin_daily_tokens(date.today().isoformat())
+            finally:
+                ai_reader._DEVIN_DB = old_db
+
+        self.assertEqual(result[date.today().isoformat()]["glm-5-2"]["input"], 9)
 
     def test_workbuddy_tokens_split_by_entry_date(self):
         """WorkBuddy usage is per request and dated by the entry timestamp."""
