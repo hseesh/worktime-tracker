@@ -595,6 +595,34 @@ class TestDataIntegrityRegressions(unittest.TestCase):
         self.assertEqual((ai_row["device_id"], ai_row["input_tokens"]), ("local", 10))
         self.assertEqual((tool_row["device_id"], tool_row["count"]), ("local", 3))
 
+    def test_legacy_devin_activity_table_migrates_to_device_key(self):
+        """Existing activity rows survive the device_id migration."""
+        os.unlink(self._db_path)
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "CREATE TABLE devin_activity_daily (date TEXT NOT NULL PRIMARY KEY, "
+            "data_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO devin_activity_daily VALUES "
+            "('2026-08-20', '{\"projects\": [{\"project\": \"p\", \"duration\": 5}]}', 'now')"
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = TimeRecorder(device_id="local")
+        conn = migrated._conn()
+        try:
+            row = conn.execute(
+                "SELECT device_id, date, data_json FROM devin_activity_daily"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual(row["device_id"], "local")
+        self.assertEqual(row["date"], "2026-08-20")
+        self.assertIn('"project": "p"', row["data_json"])
+
     def test_codex_cumulative_tokens_are_split_at_local_midnight(self):
         with tempfile.TemporaryDirectory() as td:
             sessions = Path(td) / "sessions"
@@ -694,6 +722,98 @@ class TestDataIntegrityRegressions(unittest.TestCase):
             "SELECT COUNT(*) FROM tag_time_records WHERE device_id = ''"
         ).fetchone()[0]
         self.assertEqual(blank, 0)
+
+    def test_devin_activity_keeps_each_device_separate(self):
+        """A pulled snapshot must not overwrite this device's own activity row.
+
+        The table keyed on ``date`` alone, so a pull replaced the local row and
+        the next push re-published the borrowed snapshot under this device's id,
+        collapsing both devices into whichever synced last.
+        """
+        today = date.today().isoformat()
+        local = {"projects": [{"project": "mine", "sessions": 2, "messages": 4, "duration": 100}],
+                 "tool_kinds": {"edit": 3}, "titles": []}
+        self.recorder.upsert_devin_activity_daily(today, json.dumps(local))
+        self.recorder.upsert_cloud_devin_activity_daily({
+            "device_id": "remote-device", "date": today,
+            "data_json": json.dumps({
+                "projects": [{"project": "theirs", "sessions": 1, "messages": 1, "duration": 50}],
+                "tool_kinds": {"edit": 7}, "titles": [],
+            }),
+            "updated_at": "2026-01-01T00:00:00",
+        })
+
+        rows = self.recorder._conn().execute(
+            "SELECT device_id FROM devin_activity_daily WHERE date = ? ORDER BY device_id", (today,)
+        ).fetchall()
+        self.assertEqual([r["device_id"] for r in rows], ["local", "remote-device"])
+
+    def test_devin_activity_day_merges_all_devices(self):
+        """The day view sums every device's snapshot instead of showing one."""
+        today = date.today().isoformat()
+        self.recorder.upsert_devin_activity_daily(today, json.dumps({
+            "projects": [{"project": "mine", "sessions": 2, "messages": 4, "duration": 100}],
+            "tool_kinds": {"edit": 3, "read": 1},
+            "agent_modes": {"bypass": 1},
+            "titles": [{"title": "a", "duration": 10}],
+        }))
+        self.recorder.upsert_cloud_devin_activity_daily({
+            "device_id": "remote-device", "date": today,
+            "data_json": json.dumps({
+                "projects": [{"project": "theirs", "sessions": 1, "messages": 2, "duration": 50}],
+                "tool_kinds": {"edit": 7, "read": 2},
+                "agent_modes": {"bypass": 3},
+                "titles": [{"title": "b", "duration": 99}],
+            }),
+            "updated_at": "2026-01-01T00:00:00",
+        })
+
+        merged = self.recorder.get_devin_activity_daily(today)
+        projects = {p["project"]: p for p in merged["projects"]}
+        self.assertEqual(sorted(projects), ["mine", "theirs"])
+        self.assertEqual(projects["mine"]["sessions"], 2)
+        self.assertEqual(projects["theirs"]["messages"], 2)
+        self.assertEqual(merged["tool_kinds"], {"edit": 10, "read": 3})
+        self.assertEqual(merged["agent_modes"], {"bypass": 4})
+        self.assertEqual([t["title"] for t in merged["titles"]], ["b", "a"])
+        # Longest-first ordering by project duration.
+        self.assertEqual([p["project"] for p in merged["projects"]], ["mine", "theirs"])
+
+    def test_devin_activity_same_project_sums_across_devices(self):
+        """One project worked on by two machines reports the combined effort."""
+        today = date.today().isoformat()
+        self.recorder.upsert_devin_activity_daily(today, json.dumps({
+            "projects": [{"project": "shared", "sessions": 1, "messages": 3, "duration": 60}],
+            "titles": [],
+        }))
+        self.recorder.upsert_cloud_devin_activity_daily({
+            "device_id": "remote-device", "date": today,
+            "data_json": json.dumps({
+                "projects": [{"project": "shared", "sessions": 2, "messages": 5, "duration": 40}],
+                "titles": [],
+            }),
+            "updated_at": "2026-01-01T00:00:00",
+        })
+
+        merged = self.recorder.get_devin_activity_daily(today)
+        self.assertEqual(len(merged["projects"]), 1)
+        entry = merged["projects"][0]
+        self.assertEqual(entry["sessions"], 3)
+        self.assertEqual(entry["messages"], 8)
+        self.assertEqual(entry["duration"], 100)
+
+    def test_devin_activity_push_only_sends_own_rows(self):
+        """Pulled devices' rows must never be re-published under this device."""
+        today = date.today().isoformat()
+        self.recorder.upsert_devin_activity_daily(today, json.dumps({"projects": [], "titles": []}))
+        self.recorder.upsert_cloud_devin_activity_daily({
+            "device_id": "remote-device", "date": today,
+            "data_json": json.dumps({"projects": [{"project": "x", "duration": 5}], "titles": []}),
+            "updated_at": "2026-01-01T00:00:00",
+        })
+
+        pushed = self.recorder.get_local_devin_activity_for_sync(today)
+        self.assertEqual({r["device_id"] for r in pushed}, {"local"})
 
     def test_all_history_uses_cloud_only_dates(self):
         old_date = (date.today() - timedelta(days=100)).isoformat()

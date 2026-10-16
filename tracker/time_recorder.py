@@ -11,6 +11,40 @@ from config import DB_FILE
 
 logger = logging.getLogger(__name__)
 
+
+def _merge_devin_activity(parts: List[Dict]) -> Optional[Dict]:
+    """Sum per-device Devin activity snapshots into one day view.
+
+    Mirrors ``mergeActivity`` in ``web/mobile.html``: projects are summed by
+    name, the counter maps are added, and titles are kept longest-first.
+    Returns ``None`` when no snapshot contributed anything.
+    """
+    parts = [p for p in parts if isinstance(p, dict)]
+    if not parts:
+        return None
+    merged = {
+        "projects": [], "tool_kinds": {}, "agent_modes": {},
+        "backend_types": {}, "msg_dist": {}, "titles": [],
+    }
+    projects: Dict[str, Dict] = {}
+    for part in parts:
+        for p in part.get("projects") or []:
+            name = p.get("project", "")
+            cur = projects.setdefault(
+                name, {"project": name, "sessions": 0, "messages": 0, "duration": 0}
+            )
+            cur["sessions"] += p.get("sessions", 0) or 0
+            cur["messages"] += p.get("messages", 0) or 0
+            cur["duration"] += p.get("duration", 0) or 0
+        for field in ("tool_kinds", "agent_modes", "backend_types", "msg_dist"):
+            for k, v in (part.get(field) or {}).items():
+                merged[field][k] = merged[field].get(k, 0) + (v or 0)
+        merged["titles"].extend(part.get("titles") or [])
+    merged["projects"] = sorted(projects.values(), key=lambda p: -p["duration"])
+    merged["titles"].sort(key=lambda t: -(t.get("duration", 0) or 0))
+    merged["titles"] = merged["titles"][:10]
+    return merged
+
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS time_records (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,9 +181,11 @@ CREATE TABLE IF NOT EXISTS tool_call_daily (
 
 _CREATE_DEVIN_ACTIVITY_SQL = """
 CREATE TABLE IF NOT EXISTS devin_activity_daily (
-    date           TEXT    NOT NULL PRIMARY KEY,
+    device_id      TEXT    NOT NULL DEFAULT '',
+    date           TEXT    NOT NULL,
     data_json      TEXT    NOT NULL DEFAULT '{}',
-    updated_at     TEXT    NOT NULL
+    updated_at     TEXT    NOT NULL,
+    PRIMARY KEY (device_id, date)
 );
 """
 
@@ -213,6 +249,7 @@ class TimeRecorder:
             self._migrate_add_device_id(conn)
             self._migrate_ai_cache_device_id(conn)
             self._migrate_tool_cache_device_id(conn)
+            self._migrate_devin_activity_device_id(conn)
             # History range app breakdowns read these fields together. Keep a
             # covering index so the aggregation does not fetch every segment
             # row from the table for each History request.
@@ -421,6 +458,38 @@ class TimeRecorder:
         )
         conn.execute("DROP TABLE tool_call_daily")
         conn.execute("ALTER TABLE tool_call_daily_new RENAME TO tool_call_daily")
+
+    def _migrate_devin_activity_device_id(self, conn):
+        """Give devin_activity_daily a device_id so devices stop overwriting each other.
+
+        The table used ``date`` alone as its primary key, so pulling another
+        device's snapshot replaced this device's row for the same day, and the
+        next push re-published that borrowed snapshot under this device's id.
+        Two devices therefore collapsed into whichever was synced last.
+        """
+        cols = conn.execute("PRAGMA table_info(devin_activity_daily)").fetchall()
+        if "device_id" in {c["name"] for c in cols}:
+            return
+        conn.execute(
+            """
+            CREATE TABLE devin_activity_daily_new (
+                device_id TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL,
+                data_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO devin_activity_daily_new (device_id, date, data_json, updated_at)
+            SELECT ?, date, data_json, updated_at FROM devin_activity_daily
+            """,
+            (self._device_id,),
+        )
+        conn.execute("DROP TABLE devin_activity_daily")
+        conn.execute("ALTER TABLE devin_activity_daily_new RENAME TO devin_activity_daily")
 
     @staticmethod
     def _seed_default_tags(conn):
@@ -1553,29 +1622,38 @@ class TimeRecorder:
         conn = self._conn()
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO devin_activity_daily (date, data_json, updated_at) "
-                "VALUES (?, ?, ?)",
-                (d_iso, data_json, datetime.now().isoformat(timespec="seconds")),
+                "INSERT OR REPLACE INTO devin_activity_daily "
+                "(device_id, date, data_json, updated_at) VALUES (?, ?, ?, ?)",
+                (self._device_id, d_iso, data_json,
+                 datetime.now().isoformat(timespec="seconds")),
             )
             conn.commit()
         finally:
             conn.close()
 
     def get_devin_activity_daily(self, d_iso: str) -> Optional[Dict]:
+        """Return the merged Devin activity for *d_iso* across all devices.
+
+        Each device contributes its own snapshot row, so the day view sums them
+        the same way the mobile page merges the cloud rows.
+        """
         conn = self._conn()
         try:
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT data_json FROM devin_activity_daily WHERE date = ?",
                 (d_iso,),
-            ).fetchone()
+            ).fetchall()
         finally:
             conn.close()
-        if not row or not row["data_json"]:
-            return None
-        try:
-            return json.loads(row["data_json"])
-        except (json.JSONDecodeError, TypeError):
-            return None
+        parts = []
+        for row in rows:
+            if not row["data_json"]:
+                continue
+            try:
+                parts.append(json.loads(row["data_json"]))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return _merge_devin_activity(parts)
 
     def get_cached_devin_activity_dates(self) -> set:
         conn = self._conn()
@@ -1608,12 +1686,17 @@ class TimeRecorder:
         self.upsert_devin_activity_daily(today, json.dumps(data))
 
     def get_local_devin_activity_for_sync(self, include_date: str) -> List[Dict]:
-        """Return this device's devin_activity_daily rows for dates <= include_date."""
+        """Return this device's devin_activity_daily rows for dates <= include_date.
+
+        Only this device's rows are uploaded; pulled devices remain local cache
+        rows and must never be re-published under this device's identity.
+        """
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT date, data_json, updated_at FROM devin_activity_daily WHERE date <= ?",
-                (include_date,),
+                "SELECT date, data_json, updated_at FROM devin_activity_daily "
+                "WHERE device_id = ? AND date <= ?",
+                (self._device_id, include_date),
             ).fetchall()
         finally:
             conn.close()
@@ -1625,9 +1708,9 @@ class TimeRecorder:
         conn = self._conn()
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO devin_activity_daily (date, data_json, updated_at) "
-                "VALUES (?, ?, ?)",
-                (row["date"], row["data_json"], row.get("updated_at", "")),
+                "INSERT OR REPLACE INTO devin_activity_daily "
+                "(device_id, date, data_json, updated_at) VALUES (?, ?, ?, ?)",
+                (row["device_id"], row["date"], row["data_json"], row.get("updated_at", "")),
             )
             conn.commit()
         finally:
