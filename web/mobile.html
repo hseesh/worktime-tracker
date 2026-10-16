@@ -426,9 +426,13 @@ function localDateStr(d) {
 }
 
 // Reduce a token source to the bare model name.
-//   codebuddy/deepseek-v4.1-flash                                  -> deepseek-v4.1-flash
+//   codebuddy/deepseek-v4.1-flash                                  -> deepseek-v4-1-flash
 //   dfbyok-provider-<uuid>-step-5-preview-<hash>                   -> step-5-preview
 // Keeps one model from being listed per provider / BYOK credential.
+//
+// Must stay in step with normalize_token_source in tracker/ai_token_reader.py:
+// both sides reduce the same cloud rows, so a rule only one of them applies
+// splits one model into two rows that disagree between mobile and desktop.
 function normalizeTokenSource(source) {
   var name = (source || '').trim();
   var slash = name.indexOf('/');
@@ -441,8 +445,13 @@ function normalizeTokenSource(source) {
   var m = name.match(
     /^dfbyok-provider-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]+-(.+?)-[0-9a-f]{16}$/
   );
-  if (m) return m[1];
-  return name || 'unknown';
+  if (m) name = m[1];
+  if (!name) return 'unknown';
+  // Versions are spelled both ways across sources - deepseek-v4-1-flash
+  // (Devin) and deepseek-v4.1-flash (DSH/Codex/WorkBuddy) - so a dot between
+  // digits folds onto the dash form. Only digits around the dot qualify, so a
+  // trailing qualifier such as -sg is untouched.
+  return name.replace(/(\d)\.(?=\d)/g, '$1-');
 }
 
 // Merge one device's devin_activity snapshot into the accumulated result so the
