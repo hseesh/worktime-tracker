@@ -125,12 +125,18 @@ def _read_devin_session_daily(con: sqlite3.Connection, sid: str) -> Optional[Dic
     (Anthropic-style models report ``input_tokens`` as only the uncached part),
     so they are folded into ``input``.
 
-    Returns ``{date_iso: {"input", "output", "cached", "messages"}}`` or ``None``.
+    Devin Desktop (windsurf backend) leaves ``sessions.model`` empty, so each
+    day also reports the dominant ``generation_model`` of its assistant
+    messages (normalized through :func:`normalize_token_source`) as
+    ``entry["model"]``; the caller uses it when the session has no model.
+
+    Returns ``{date_iso: {"input", "output", "cached", "messages", "model"}}`` or ``None``.
     """
     try:
         rows = con.execute(
             "SELECT json_extract(chat_message, '$.metadata.metrics') AS metrics, "
             "json_extract(chat_message, '$.metadata.created_at') AS msg_created, "
+            "json_extract(chat_message, '$.metadata.generation_model') AS gen_model, "
             "created_at AS node_created "
             "FROM message_nodes WHERE row_id IN ("
             "SELECT MAX(row_id) FROM message_nodes WHERE session_id = ? "
@@ -145,11 +151,12 @@ def _read_devin_session_daily(con: sqlite3.Connection, sid: str) -> Optional[Dic
     if not rows:
         return None
     daily: Dict[str, Dict] = {}
+    day_models: Dict[str, Dict[str, int]] = {}
 
     def day_entry(d_iso: str) -> Dict:
         return daily.setdefault(d_iso, {"input": 0, "output": 0, "cached": 0, "messages": 0})
 
-    for raw, msg_created, node_created in rows:
+    for raw, msg_created, gen_model, node_created in rows:
         try:
             m = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -163,8 +170,19 @@ def _read_devin_session_daily(con: sqlite3.Connection, sid: str) -> Optional[Dic
         entry["input"] += int(m.get("input_tokens", 0) or 0) + int(m.get("cache_creation_tokens", 0) or 0)
         entry["output"] += int(m.get("output_tokens", 0) or 0)
         entry["cached"] += int(m.get("cache_read_tokens", 0) or 0)
+        if gen_model:
+            day_models.setdefault(d_iso, {}).setdefault(gen_model, 0)
+            day_models[d_iso][gen_model] += 1
     if not daily:
         return None
+
+    # Pick each day's dominant message model so sessions without a model can
+    # still be attributed to the model that actually generated the tokens.
+    for d_iso, entry in daily.items():
+        counts = day_models.get(d_iso) or {}
+        best = max(counts.items(), key=lambda kv: kv[1])[0] if counts else ""
+        normalized = normalize_token_source(best) if best else ""
+        entry["model"] = normalized or None
 
     # Count user-sent messages from message_nodes (role=user AND is_user_input=true),
     # dated by the same per-message rule as the usage above.
@@ -297,6 +315,9 @@ def read_devin_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
         for d_iso, metrics in daily.items():
             if target_date and d_iso != target_date:
                 continue
+            # Devin Desktop leaves sessions.model empty; fall back to the
+            # dominant generation_model of that day's assistant messages.
+            mdl = model or metrics.get("model") or "unknown"
             entry = result.setdefault(d_iso, {}).setdefault(
                 mdl, {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0}
             )
