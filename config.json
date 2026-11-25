@@ -26,7 +26,8 @@
     "哔哩哔哩.exe": "Other (哔哩哔哩.exe)",
     "Qoder.exe": "Other (Qoder.exe)",
     "WorkBuddyAI.exe": "Other (WorkBuddyAI.exe)",
-    "Photoshop.exe": "Photoshop.exe"
+    "Photoshop.exe": "Photoshop.exe",
+    "GameViewer.exe": "Other (GameViewer.exe)"
   },
   "idle_threshold": 300,
   "poll_interval": 1000,
@@ -318,6 +319,9 @@
     },
     "photoshop.exe": {
       "display:photoshop.exe": "Indie"
+    },
+    "gameviewer.exe": {
+      "display:other (gameviewer.exe)": "Indie"
     }
   },
   "url_tag_rules": {
@@ -365,6 +369,6 @@
     "anon_key": "sb_publishable_V3VfpbZEjZUbvQ4DYilXWQ_x02ikkUs",
     "enabled": true
   },
-  "device_id": "6a0f049d-c856-4e77-947a-bd132717a1fe",
-  "last_sync_date": "2026-09-08"
+  "device_id": "1e9d1868-575a-41fb-9afd-d0f00549485e",
+  "last_sync_date": "2026-11-25"
 }

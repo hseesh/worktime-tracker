@@ -84,6 +84,8 @@ body {
 .time-stat.indie .val { color: var(--green); }
 .time-stat.work .val { color: var(--blue); }
 
+.sync-status { margin-top:12px; padding-top:10px; border-top:1px solid var(--border); font-size:11px; color:var(--text-dim); line-height:1.7; }
+.sync-status small { display:block; color:var(--text-muted); font-size:10px; }
 /* Tag bar */
 .tag-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin: 12px 0 8px; gap: 1px; }
 .tag-bar > div { border-radius: 1px; }
@@ -134,14 +136,6 @@ body {
 .row-name { font-size: 14px; font-weight: 500; }
 .row-meta { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
 .row-right { font-size: 14px; font-weight: 700; flex-shrink: 0; margin-left: 12px; }
-
-/* Task rows */
-.task { display: flex; gap: 8px; padding: 7px 0; align-items: center; }
-.task + .task { border-top: 1px solid var(--border); }
-.task-dur { font-size: 11px; color: var(--text-muted); width: 36px; flex-shrink: 0; text-align: right; }
-.task-proj { font-size: 10px; color: var(--text-muted); width: 70px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-title { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-msgs { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
 
 /* Heatmap */
 .heatmap { display: flex; flex-direction: column; gap: 4px; align-items: center; }
@@ -252,6 +246,36 @@ body {
  .exec-task-time { grid-column:2; grid-row:1 / 3; font-size:12px; }
  .exec-footer { flex-wrap:wrap; font-size:9px; }
 }
+
+/* Merged legacy activity: secondary detail, never a second timing total. */
+.exec-activity { margin-top:14px; border-top:1px solid var(--exec-line); }
+.exec-activity > summary { display:flex; align-items:center; gap:9px; list-style:none; cursor:pointer; padding:13px 0; color:var(--exec-muted); font-size:11px; }
+.exec-activity > summary::-webkit-details-marker { display:none; }
+.exec-activity > summary:hover { color:var(--text); }
+.exec-activity > summary:focus-visible { outline:2px solid var(--exec-blue); outline-offset:3px; border-radius:4px; }
+.exec-activity > summary strong { font-size:12px; font-weight:550; }
+.exec-activity-chevron { display:inline-block; font-size:19px; line-height:12px; transition:transform .15s; }
+.exec-activity[open] .exec-activity-chevron { transform:rotate(90deg); }
+.exec-activity-count { margin-left:auto; font-size:10px; }
+.exec-activity-body { padding-bottom:15px; }
+.exec-activity-note { font-size:10px; line-height:1.6; color:var(--exec-muted); margin:0 0 12px; }
+.exec-project-scroll { overflow-x:auto; }
+.exec-project-table { width:100%; border-collapse:collapse; font-size:11px; }
+.exec-project-table th { font-size:10px; color:var(--exec-muted); font-weight:500; text-transform:none; letter-spacing:0; border-bottom:1px solid var(--exec-line); padding:8px 10px; white-space:nowrap; }
+.exec-project-table td { padding:10px; border-bottom:1px solid var(--border-light, var(--exec-line)); color:var(--text); font-variant-numeric:tabular-nums; }
+.exec-project-table td:first-child { max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.exec-project-table th:first-child, .exec-project-table td:first-child { padding-left:0; text-align:left; }
+.exec-project-table th:not(:first-child), .exec-project-table td:not(:first-child) { text-align:right; white-space:nowrap; }
+.exec-project-table th:last-child, .exec-project-table td:last-child { padding-right:0; }
+.exec-project-table td:last-child { color:var(--exec-muted); }
+.exec-activity-groups { display:grid; gap:10px; margin-top:14px; }
+.exec-activity-group { display:flex; align-items:baseline; gap:10px; }
+.exec-activity-label { flex:0 0 58px; font-size:10px; color:var(--exec-muted); }
+.exec-activity-chips { display:flex; flex-wrap:wrap; gap:5px; }
+.exec-activity-chip { display:inline-flex; align-items:center; gap:7px; padding:2px 7px; font-size:10px; color:var(--exec-muted); background:rgba(122,162,247,.04); border:1px solid var(--exec-line); border-radius:5px; overflow-wrap:anywhere; }
+.exec-activity-chip b { color:var(--text); font-weight:550; font-variant-numeric:tabular-nums; }
+.exec-activity + .exec-footer { margin-top:0; }
+@media (max-width:700px) { .exec-activity-group { flex-direction:column; gap:5px; } .exec-activity-label { flex-basis:auto; } .exec-project-table { min-width:340px; } }
 </style>
 </head>
 <body>
@@ -294,6 +318,9 @@ body {
             <div class="val">{{ fmtDur(data.workSeconds) }}</div>
             <div class="lbl">Work</div>
           </div>
+        </div>
+        <div class="sync-status">云端汇总 · {{ data.syncedDevices }} 台设备<span v-if="data.cloudUpdatedAt"> · 最近上传 {{ syncTime(data.cloudUpdatedAt) }}</span>
+          <small>仅含已上传的数据；每 60 秒检查更新，回到页面时自动刷新。</small>
         </div>
         <div class="tag-bar" v-if="data.totalSeconds > 0">
           <div v-for="t in data.tags" :key="t.tag"
@@ -353,47 +380,7 @@ body {
         </div>
       </div>
 
-      <!-- Session Activity: Projects -->
-      <div class="card" v-if="data.activity && data.activity.projects && data.activity.projects.length">
-        <div class="card-title">📂 项目分布</div>
-        <div v-for="p in data.activity.projects" :key="p.project" class="row">
-          <div class="row-left">
-            <div class="row-name">{{ p.project }}</div>
-            <div class="row-meta">{{ p.sessions }} sessions · {{ p.messages }} msgs</div>
-          </div>
-          <div class="row-right">{{ fmtDur(p.duration) }}</div>
-        </div>
-      </div>
-
-      <!-- Tool Activity -->
-      <div class="card" v-if="data.activity && data.activity.tool_kinds && Object.keys(data.activity.tool_kinds).length">
-        <div class="card-title">⚡ 工具活动</div>
-        <div class="chips">
-          <span v-for="(cnt, kind) in data.activity.tool_kinds" :key="kind" class="chip">
-            {{ kind }}<span class="n">{{ cnt }}</span>
-          </span>
-        </div>
-        <div style="margin-top:10px" v-if="data.activity.msg_dist && Object.keys(data.activity.msg_dist).length">
-          <div class="chips">
-            <span v-for="(cnt, role) in data.activity.msg_dist" :key="role" class="chip">
-              {{ role }}<span class="n">{{ cnt }}</span>
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <execution-panel v-if="data.activity && data.activity.execution" :stats="data.activity.execution" :period-label="selectedDate"></execution-panel>
-      <!-- Today's Tasks -->
-      <div class="card" v-if="data.activity && data.activity.titles && data.activity.titles.length">
-        <div class="card-title">📋 任务列表</div>
-        <div v-for="(t, i) in data.activity.titles" :key="i" class="task">
-          <span class="task-dur">{{ fmtDur(t.duration) }}</span>
-          <span class="task-proj" :title="t.project">{{ t.project }}</span>
-          <span class="task-title" :title="t.title">{{ t.title }}</span>
-          <span v-if="t.messages" class="task-msgs">{{ t.messages }} msgs</span>
-        </div>
-      </div>
-
+      <execution-panel v-if="data.activity" :stats="data.activity.execution || {}" :activity="data.activity" :period-label="selectedDate"></execution-panel>
       <!-- App Breakdown -->
       <div class="card" v-if="data.apps.length">
         <div class="card-title">📱 应用分布</div>
@@ -478,6 +465,21 @@ async function sbFetch(table, params) {
     throw new Error(table + ': HTTP ' + res.status + ' ' + body.substring(0, 100));
   }
   return res.json();
+}
+
+function mobileSyncStatus(tags) {
+  var devices = new Set();
+  var latest = null;
+  (tags || []).forEach(function(row) {
+    if (row.tag === 'Idle') return;
+    if (row.device_id) devices.add(row.device_id);
+    var timestamp = Date.parse(row.updated_at);
+    if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+  });
+  return {syncedDevices: devices.size, cloudUpdatedAt: latest === null ? null : new Date(latest).toISOString()};
+}
+function syncTime(value) {
+  return value ? new Date(value).toLocaleString() : '暂无上传';
 }
 
 function fmtDur(seconds) {
@@ -579,9 +581,16 @@ var TAG_COLORS = {
 
 // Execution panel: keep this self-contained for the standalone mobile page.
 const ExecutionPanel = {
-  props: { stats: { type: Object, required: true }, periodLabel: { type: String, default: 'Today' } },
+  props: { stats: { type: Object, required: true }, activity: { type: Object, default: () => ({}) }, periodLabel: { type: String, default: 'Today' } },
   data() { return { filter: 'all' }; },
   computed: {
+    activityProjects() { return this.activity.projects || []; },
+    activityGroups() {
+      return [['Messages', 'msg_dist'], ['Tools', 'tool_kinds'], ['Mode', 'agent_modes'], ['Backend', 'backend_types']]
+        .map(([label, key]) => ({label, values: this.activity[key] || {}}))
+        .filter(group => Object.keys(group.values).length);
+    },
+    hasActivity() { return this.activityProjects.length || this.activityGroups.length; },
     sources() {
       return ['codex', 'devin'].map(id => ({ id, name: id === 'codex' ? 'Codex' : 'Devin',
         label: id === 'codex' ? 'Agent execution' : 'Model requests',
@@ -637,7 +646,19 @@ const ExecutionPanel = {
           <div class="exec-task-time" :class="{'is-empty': !t.count}" :title="t.count ? duration(t.seconds) : 'No reliable timing available'">{{ t.count ? duration(t.seconds) : '—' }}</div>
         </div>
       </div>
-      <div v-else class="exec-empty"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg><span>No {{ filter === 'all' ? '' : filter === 'codex' ? 'Codex ' : 'Devin ' }}execution recorded for this day.</span></div>
+      <div v-else class="exec-empty"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg><span>No {{ filter === 'all' ? '' : filter === 'codex' ? 'Codex ' : 'Devin ' }}execution timing available for this day.</span></div>
+      <details v-if="hasActivity" class="exec-activity">
+        <summary><span class="exec-activity-chevron" aria-hidden="true">›</span><strong>Activity details</strong><span class="exec-activity-count">{{ activityProjects.length }} projects</span></summary>
+        <div class="exec-activity-body">
+          <p class="exec-activity-note">All sources · independent of the task filter. Session spans include idle gaps and are not execution time.</p>
+          <div v-if="activityProjects.length" class="exec-project-scroll">
+            <table class="exec-project-table"><thead><tr><th>Project</th><th>Sessions</th><th>User messages</th><th title="Merged session intervals including idle gaps; not AI execution time">Session span</th></tr></thead>
+              <tbody><tr v-for="p in activityProjects" :key="p.project"><td :title="p.project">{{ project(p.project) }}</td><td>{{ p.sessions }}</td><td>{{ p.messages }}</td><td>{{ duration(p.duration) }}</td></tr></tbody>
+            </table>
+          </div>
+          <div class="exec-activity-groups"><div v-for="group in activityGroups" :key="group.label" class="exec-activity-group"><span class="exec-activity-label">{{ group.label }}</span><div class="exec-activity-chips"><span v-for="(count, name) in group.values" :key="name" class="exec-activity-chip">{{ name }}<b>{{ count }}</b></span></div></div></div>
+        </div>
+      </details>
       <footer class="exec-footer">Separate timing methods <span>·</span> Parallel tasks summed</footer>
     </section>`
 };
@@ -704,19 +725,21 @@ var app = Vue.createApp({
       loadAll();
     }
 
+    var loadSequence = 0;
     function loadAll() {
+      var sequence = ++loadSequence;
       loading.value = true;
       error.value = '';
       Promise.all([loadDay(), loadHeatmap(), loadTrend()])
-        .catch(function(e) { error.value = e.message; })
-        .finally(function() { loading.value = false; });
+        .catch(function(e) { if (sequence === loadSequence) error.value = e.message; })
+        .finally(function() { if (sequence === loadSequence) loading.value = false; });
     }
 
     async function loadDay() {
       var d = selectedDate.value;
       var results = await Promise.all([
         sbFetch('tag_time_records_cloud', {
-          select: 'tag,seconds',
+          select: 'device_id,tag,seconds,updated_at',
           gte: ['date', d], lte: ['date', d],
         }),
         sbFetch('time_records_cloud', {
@@ -741,11 +764,15 @@ var app = Vue.createApp({
 
       var tags = results[0], apps = results[1], tokens = results[2], tools = results[3], activity = results[4];
 
-      // Tags
+      // A date change must not be overwritten by an older request.
+      if (d !== selectedDate.value) return;
+      var syncStatus = mobileSyncStatus(tags);
+      // Tags: sum every uploaded device; never filter by a single device_id.
       var tagMap = {};
       var total = 0, indie = 0, work = 0;
       for (var i = 0; i < tags.length; i++) {
         var r = tags[i];
+        if (r.tag === 'Idle') continue;
         tagMap[r.tag] = (tagMap[r.tag] || 0) + r.seconds;
         total += r.seconds;
         if (r.tag === 'Indie') indie += r.seconds;
@@ -838,6 +865,7 @@ var app = Vue.createApp({
       }
 
       data.value = {
+        syncedDevices: syncStatus.syncedDevices, cloudUpdatedAt: syncStatus.cloudUpdatedAt,
         totalSeconds: total, indieSeconds: indie, workSeconds: work,
         tags: tagsList, apps: appsList,
         ai: {
@@ -916,7 +944,21 @@ var app = Vue.createApp({
       trend7.value = days;
     }
 
-    Vue.onMounted(function() { loadAll(); });
+    var refreshTimer;
+    function refreshVisible() {
+      if (!document.hidden && !loading.value) loadAll();
+    }
+    Vue.onMounted(function() {
+      loadAll();
+      refreshTimer = setInterval(refreshVisible, 60000);
+      document.addEventListener('visibilitychange', refreshVisible);
+      window.addEventListener('pageshow', refreshVisible);
+    });
+    Vue.onUnmounted(function() {
+      clearInterval(refreshTimer);
+      document.removeEventListener('visibilitychange', refreshVisible);
+      window.removeEventListener('pageshow', refreshVisible);
+    });
 
     return {
       loading: loading, error: error, data: data,
@@ -925,7 +967,7 @@ var app = Vue.createApp({
       tagColor: tagColor, heatmapLevel: heatmapLevel,
       sourceColor: sourceColor, sourcePct: sourcePct,
       selectDate: selectDate, loadAll: loadAll,
-      fmtDur: fmtDur, fmtTokens: fmtTokens,
+      fmtDur: fmtDur, fmtTokens: fmtTokens, syncTime: syncTime,
       normalizeTokenSource: normalizeTokenSource,
     };
   },

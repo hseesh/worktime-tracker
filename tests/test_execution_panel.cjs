@@ -14,9 +14,9 @@ assert.equal(component(pages[0]), component(pages[1]), 'desktop and mobile share
 const context = {};
 vm.createContext(context);
 vm.runInContext(component(pages[0]) + '\nthis.Panel = ExecutionPanel;', context);
-function panel(stats) {
+function panel(stats, activity = {}) {
   const definition = context.Panel;
-  const instance = {stats, ...definition.data()};
+  const instance = {stats, activity, ...definition.data()};
   for (const [k,v] of Object.entries(definition.methods)) instance[k] = v.bind(instance);
   for (const [k,v] of Object.entries(definition.computed)) Object.defineProperty(instance,k,{get:v.bind(instance)});
   return instance;
@@ -41,6 +41,14 @@ ui.filter='codex';
 assert.equal(ui.filteredTasks.length,7);
 assert.ok(ui.visibleTasks.every(t=>t.source==='codex'));
 assert.equal(ui.tabs[0].count,15);
+const activity = {projects:[{project:'P1-c/Assets',sessions:2,messages:3,duration:600}],msg_dist:{user:3},tool_kinds:{execute:4},agent_modes:{auto:2},backend_types:{desktop:2}};
+const combined = panel({sources:{},tasks:[]},activity);
+assert.equal(combined.activityProjects.length,1);
+assert.equal(combined.activityGroups.length,4);
+assert.equal(combined.hasActivity,1);
+combined.filter='devin';
+assert.equal(combined.activityProjects[0].sessions,2, 'task filtering does not misrepresent legacy activity scope');
+assert.equal(panel({}).hasActivity,0);
 ui.filter='no-source';
 assert.equal(ui.visibleTasks.length,0);
 for (const [i,html] of pages.entries()) {
@@ -51,5 +59,11 @@ for (const [i,html] of pages.entries()) {
   }
   assert.ok(html.includes('components: { ExecutionPanel }'));
   assert.ok(!html.includes('0 missing'));
+  assert.ok(!html.includes("Today's Tasks"), 'obsolete session-span task heading removed');
+  assert.ok(!/v-for="[^"]*(?:devin_activity|activity)\.titles/.test(html), 'obsolete task lists removed');
+  assert.ok(html.includes('<execution-panel'), 'execution tasks retained');
+  assert.ok(!html.includes('AI Session Activity (Today)'), 'no duplicate activity card');
+  assert.ok(html.includes('Activity details') && html.includes('Session span'), 'legacy data merged with distinct timing label');
+  assert.ok(html.includes(':activity='), 'activity data passed into merged panel');
 }
 console.log('PASS: execution panel formatting, filters, top-10, missing data, shared templates and page syntax');

@@ -374,6 +374,8 @@ def _read_codex_file_tokens(filepath: Path) -> Optional[Dict]:
                     payload = obj.get("payload") or {}
                     provenance = (payload.get("base_instructions") or {}).get("provenance") or {}
                     model = provenance.get("model") or ""
+                if obj.get("type") == "turn_context":
+                    model = (obj.get("payload") or {}).get("model") or model
                 if obj.get("type") == "event_msg" and obj.get("payload", {}).get("type") == "token_count":
                     payload = obj.get("payload") or {}
                     usage = (payload.get("info") or {}).get("total_token_usage")
@@ -393,7 +395,7 @@ def _read_codex_file_tokens(filepath: Path) -> Optional[Dict]:
         "output": int(last_usage.get("output_tokens", 0) or 0),
         "cached": cached,
         "reasoning": int(last_usage.get("reasoning_output_tokens", 0) or 0),
-        "model": model or "codex",
+        "model": model or "unknown",
     }
 
 
@@ -415,20 +417,27 @@ def _is_codex_user_message(payload: Dict) -> bool:
 
 
 def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
-    """Split cumulative Codex token counters into local-day deltas.
+    """Attribute cumulative deltas to each turn's actual model and local day.
 
-    ``messages`` counts the user-typed messages of the transcript, matching
-    how Devin sessions are counted.
+    Model changes never reset the session-wide usage counters. User messages
+    preceding turn_context are held until their turn's model is known.
     """
-    model = "codex"
+    model = "unknown"
     previous = None
     daily: Dict[str, Dict] = {}
+    pending_messages = []
 
     def day_entry(d_iso: str) -> Dict:
-        return daily.setdefault(
-            d_iso,
-            {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0},
+        return daily.setdefault(d_iso, {}).setdefault(
+            model, {"input": 0, "output": 0, "cached": 0, "sessions": 0, "messages": 0}
         )
+
+    def flush_messages():
+        for d_iso in pending_messages:
+            entry = day_entry(d_iso)
+            entry["messages"] += 1
+            entry["sessions"] = 1
+        pending_messages.clear()
 
     fallback_date = _codex_file_date(filepath) or ""
     try:
@@ -438,39 +447,36 @@ def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                payload = obj.get("payload") or {}
                 if obj.get("type") == "session_meta":
-                    payload = obj.get("payload") or {}
                     provenance = (payload.get("base_instructions") or {}).get("provenance") or {}
-                    model = provenance.get("model") or model
+                    model = payload.get("model") or provenance.get("model") or model
+                    continue
+                if obj.get("type") == "turn_context":
+                    model = payload.get("model") or model
+                    flush_messages()
                     continue
                 if obj.get("type") == "response_item":
-                    payload = obj.get("payload") or {}
-                    if (
-                        payload.get("type") == "message"
-                        and payload.get("role") == "user"
-                        and _is_codex_user_message(payload)
-                    ):
+                    if payload.get("type") == "message" and payload.get("role") == "user" and _is_codex_user_message(payload):
                         d_iso = _event_local_date(obj, fallback_date)
                         if d_iso:
-                            day_entry(d_iso)["messages"] += 1
+                            pending_messages.append(d_iso)
                     continue
-                if obj.get("type") != "event_msg" or (obj.get("payload") or {}).get("type") != "token_count":
+                if obj.get("type") != "event_msg" or payload.get("type") != "token_count":
                     continue
-                usage = (((obj.get("payload") or {}).get("info") or {}).get("total_token_usage"))
+                usage = (payload.get("info") or {}).get("total_token_usage")
                 if not usage:
                     continue
+                flush_messages()
                 current = {
                     "input": int(usage.get("input_tokens", 0) or 0),
                     "output": int(usage.get("output_tokens", 0) or 0),
                     "cached": int(usage.get("cached_input_tokens", 0) or 0),
                 }
-                # Codex (OpenAI API): input_tokens INCLUDES cached_input_tokens.
-                # Normalize so input = new tokens only, matching Devin's convention.
                 current["input"] = max(0, current["input"] - current["cached"])
                 deltas = {}
                 for key, value in current.items():
                     old = previous.get(key, 0) if previous else 0
-                    # A counter reset begins a new cumulative sequence.
                     deltas[key] = value - old if value >= old else value
                 previous = current
                 if not any(deltas.values()):
@@ -482,9 +488,10 @@ def _read_codex_file_daily_tokens(filepath: Path) -> Dict[str, Dict]:
                 entry["sessions"] = 1
                 for key, value in deltas.items():
                     entry[key] += value
+        flush_messages()
     except OSError as e:
         logger.debug("Failed to read Codex file %s: %s", filepath, e)
-    return {d_iso: {model: entry} for d_iso, entry in daily.items()}
+    return daily
 
 
 def read_today_tool_calls() -> Dict:
@@ -740,7 +747,7 @@ def read_codex_daily_tokens(target_date: Optional[str] = None) -> Dict[str, Dict
         {date_iso: {model: {"input": int, "output": int, "cached": int, "sessions": int, "messages": 0}}}
 
     If *target_date* is given, only files matching that date are read.
-    Older Codex sessions without provenance.model fall back to "codex".
+    Uses turn_context.model per turn; missing model metadata is "unknown".
     """
     result: Dict[str, Dict] = {}
     dirs = [_CODEX_SESSIONS_DIR, _CODEX_ARCHIVED_DIR]
