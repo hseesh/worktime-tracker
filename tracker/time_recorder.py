@@ -40,6 +40,10 @@ def _merge_devin_activity(parts: List[Dict]) -> Optional[Dict]:
             for k, v in (part.get(field) or {}).items():
                 merged[field][k] = merged[field].get(k, 0) + (v or 0)
         merged["titles"].extend(part.get("titles") or [])
+    from tracker.execution_stats import merge_execution
+    execution = merge_execution([p["execution"] for p in parts if p.get("execution")])
+    if execution is not None:
+        merged["execution"] = execution
     merged["projects"] = sorted(projects.values(), key=lambda p: -p["duration"])
     merged["titles"].sort(key=lambda t: -(t.get("duration", 0) or 0))
     merged["titles"] = merged["titles"][:10]
@@ -1674,7 +1678,7 @@ class TimeRecorder:
             d_iso = cursor.isoformat()
             if d_iso not in cached_dates:
                 data = read_daily_devin_activity(d_iso)
-                if data.get("projects") or data.get("titles") or data.get("msg_dist"):
+                if data.get("projects") or data.get("titles") or data.get("msg_dist") or data.get("execution", {}).get("tasks"):
                     self.upsert_devin_activity_daily(d_iso, json.dumps(data))
             cursor += timedelta(days=1)
 

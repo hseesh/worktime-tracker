@@ -1210,6 +1210,13 @@ def format_tokens(n: int) -> str:
 
 
 def read_daily_devin_activity(target_date: str) -> Dict:
+    from tracker.execution_stats import read_execution_stats
+    result = _read_daily_session_activity(target_date)
+    result["execution"] = read_execution_stats(target_date, _DEVIN_DB, (_CODEX_SESSIONS_DIR, _CODEX_ARCHIVED_DIR))
+    return result
+
+
+def _read_daily_session_activity(target_date: str) -> Dict:
     """Read Devin session activity for a specific date.
 
     Returns:

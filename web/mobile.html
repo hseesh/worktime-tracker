@@ -176,6 +176,82 @@ body {
 .error-screen { text-align: center; padding: 40px 20px; color: var(--red); font-size: 14px; }
 .skeleton { background: linear-gradient(90deg, var(--card) 25%, var(--card-hover) 50%, var(--card) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 14px; height: 80px; margin-top: 12px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
+/* Execution statistics — intentionally scoped to the panel. */
+.execution-panel { --exec-blue: var(--accent, #7aa2f7); --exec-purple: var(--purple, #bb9af7); --exec-muted: var(--text-dim, #9aa5ce); --exec-line: var(--border, #2a2e3f); margin-bottom:16px; }
+.exec-header, .exec-heading { display:flex; align-items:center; gap:10px; }
+.exec-header { justify-content:space-between; gap:16px; margin-bottom:18px; }
+.exec-heading { min-width:0; }
+.exec-heading svg, .exec-empty svg { width:19px; height:19px; stroke:var(--exec-blue); stroke-width:1.6; flex-shrink:0; }
+.exec-heading h3 { font-size:15px; font-weight:650; letter-spacing:-.02em; white-space:nowrap; margin:0; color:var(--text); }
+.exec-period { font-size:10px; line-height:20px; padding:0 7px; border:1px solid var(--exec-line); border-radius:5px; color:var(--exec-muted); white-space:nowrap; }
+.exec-help { position:relative; flex-shrink:0; color:var(--exec-muted); }
+.exec-help summary { list-style:none; font-size:11px; cursor:pointer; display:flex; align-items:center; gap:6px; }
+.exec-help summary::-webkit-details-marker { display:none; }
+.exec-help summary:hover { color:var(--text); }
+.exec-help summary:focus-visible, .exec-filters button:focus-visible { outline:2px solid var(--exec-blue); outline-offset:4px; border-radius:4px; }
+.exec-help-content { position:absolute; top:28px; right:0; width:min(340px, calc(100vw - 64px)); padding:16px; z-index:20; font-size:12px; line-height:1.65; border-radius:9px; border:1px solid var(--exec-line); background:var(--bg-card, var(--card, #1f2335)); box-shadow:0 12px 32px rgba(0,0,0,.35); }
+.exec-help-content strong { display:block; font-size:12px; color:var(--text); margin-bottom:8px; }
+.exec-help-content p + p { margin-top:8px; }
+.exec-help-content b { color:var(--text); }
+.exec-summaries { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.exec-summary { min-width:0; padding:17px 18px 14px; border:1px solid var(--exec-line); border-radius:10px; background:rgba(122,162,247,.035); }
+.exec-summary.devin { background:rgba(187,154,247,.035); }
+.exec-summary.is-empty { background:rgba(255,255,255,.015); }
+.exec-source { display:flex; gap:8px; align-items:center; min-height:18px; }
+.exec-source strong { font-size:12px; font-weight:650; color:var(--text); }
+.exec-source > span:last-child { color:var(--exec-muted); font-size:11px; margin-left:auto; }
+.exec-source-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.exec-source-dot.codex { background:var(--exec-blue); }
+.exec-source-dot.devin { background:var(--exec-purple); }
+.exec-value { display:flex; align-items:baseline; gap:9px; margin-top:13px; min-height:36px; color:var(--exec-blue); font-size:30px; font-weight:700; line-height:1.2; letter-spacing:-.04em; font-variant-numeric:tabular-nums; }
+.devin .exec-value { color:var(--exec-purple); }
+.exec-value small { font-size:13px; font-weight:500; color:var(--exec-muted); margin-left:3px; letter-spacing:0; }
+.exec-value.exec-no-value { color:var(--text-muted, #6e7681); font-size:28px; }
+.exec-summary-meta { display:flex; flex-wrap:wrap; gap:6px 12px; font-size:11px; color:var(--exec-muted); margin-top:7px; line-height:1.5; }
+.exec-warning { color:var(--yellow, #e0af68) !important; }
+.exec-list-heading { display:flex; align-items:center; justify-content:space-between; margin:22px 0 10px; }
+.exec-list-heading h4 { font-size:12px; font-weight:650; color:var(--text); margin:0; }
+.exec-list-heading > span { font-size:11px; color:var(--exec-muted); }
+.exec-filters { display:flex; align-items:center; gap:4px; margin-bottom:12px; }
+.exec-filters button { border:1px solid transparent; border-radius:6px; color:var(--exec-muted); background:transparent; padding:5px 9px; font-size:11px; font-family:inherit; cursor:pointer; line-height:18px; }
+.exec-filters button:hover { background:rgba(122,162,247,.05); color:var(--text); }
+.exec-filters button.active { color:var(--exec-blue); background:rgba(122,162,247,.1); border-color:rgba(122,162,247,.12); }
+.exec-filters button > span { font-size:10px; margin-left:7px; opacity:.7; font-variant-numeric:tabular-nums; }
+.exec-table-head, .exec-task { display:grid; grid-template-columns:minmax(0, 1fr) minmax(100px, 24%) 100px; gap:20px; align-items:center; }
+.exec-table-head { padding:0 0 9px; font-size:10px; color:var(--exec-muted); border-bottom:1px solid var(--exec-line); }
+.exec-table-head > span:last-child { text-align:right; }
+.exec-task { padding:13px 0; }
+.exec-task + .exec-task { border-top:1px solid var(--border-light, var(--exec-line)); }
+.exec-task-main { min-width:0; }
+.exec-task-title { font-size:13px; font-weight:500; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; line-height:1.5; }
+.exec-task-meta { display:flex; align-items:center; gap:8px; margin-top:5px; min-width:0; }
+.exec-task-meta > span:last-child { font-size:10px; color:var(--exec-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.exec-source-tag { display:inline-block; font-size:9px; font-weight:600; line-height:17px; padding:0 6px; border-radius:4px; color:var(--exec-blue); background:rgba(122,162,247,.09); flex-shrink:0; }
+.exec-source-tag.devin { color:var(--exec-purple); background:rgba(187,154,247,.09); }
+.exec-project { font-size:11px; color:var(--exec-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.exec-task-time { text-align:right; font-size:13px; font-weight:600; color:var(--text); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.exec-task-time.is-empty { color:var(--exec-muted); }
+.exec-footer { border-top:1px solid var(--exec-line); padding-top:11px; margin-top:2px; font-size:10px; color:var(--exec-muted); display:flex; gap:7px; }
+.exec-footer > span { opacity:.6; }
+.exec-empty { display:flex; flex-direction:column; gap:10px; align-items:center; justify-content:center; min-height:108px; color:var(--exec-muted); font-size:12px; text-align:center; }
+.exec-empty svg { stroke:var(--exec-muted); width:23px; height:23px; opacity:.6; }
+@media (max-width:700px) {
+ .exec-header { gap:8px; align-items:flex-start; }
+ .exec-heading { flex-wrap:wrap; gap:7px; }
+ .exec-help summary { font-size:0; gap:0; }
+ .exec-help summary > span { font-size:16px; }
+ .exec-summary { padding:14px 12px 12px; }
+ .exec-source { flex-wrap:wrap; gap:6px; }
+ .exec-source > span:last-child { width:100%; margin-left:13px; font-size:10px; }
+ .exec-value { font-size:25px; gap:5px; margin-top:12px; }
+ .exec-value small { font-size:11px; margin-left:2px; }
+ .exec-table-head { display:none; }
+ .exec-task { grid-template-columns:minmax(0,1fr) auto; gap:5px 12px; }
+ .exec-task-main { grid-column:1; grid-row:1; }
+ .exec-project { grid-column:1; grid-row:2; font-size:10px; }
+ .exec-task-time { grid-column:2; grid-row:1 / 3; font-size:12px; }
+ .exec-footer { flex-wrap:wrap; font-size:9px; }
+}
 </style>
 </head>
 <body>
@@ -306,6 +382,7 @@ body {
         </div>
       </div>
 
+      <execution-panel v-if="data.activity && data.activity.execution" :stats="data.activity.execution" :period-label="selectedDate"></execution-panel>
       <!-- Today's Tasks -->
       <div class="card" v-if="data.activity && data.activity.titles && data.activity.titles.length">
         <div class="card-title">📋 任务列表</div>
@@ -457,6 +534,16 @@ function normalizeTokenSource(source) {
 // Merge one device's devin_activity snapshot into the accumulated result so the
 // day view reflects every device instead of only the first row.
 function mergeActivity(target, part) {
+  if (part.execution) {
+    if (!target.execution) target.execution = {sources: {}, tasks: []};
+    Object.keys(part.execution.sources || {}).forEach(function(source) {
+      var v = part.execution.sources[source];
+      var acc = target.execution.sources[source] || (target.execution.sources[source] = {seconds:0,count:0,missing:0});
+      ['seconds','count','missing'].forEach(function(k) { acc[k] += v[k] || 0; });
+    });
+    target.execution.tasks = target.execution.tasks.concat(part.execution.tasks || []).sort(function(a,b) {return b.seconds-a.seconds;});
+  }
+
   var projMap = {};
   target.projects.forEach(function(p) { projMap[p.project] = p; });
   (part.projects || []).forEach(function(p) {
@@ -490,7 +577,73 @@ var TAG_COLORS = {
   Other: '#6e7681', Idle: '#30363d',
 };
 
+// Execution panel: keep this self-contained for the standalone mobile page.
+const ExecutionPanel = {
+  props: { stats: { type: Object, required: true }, periodLabel: { type: String, default: 'Today' } },
+  data() { return { filter: 'all' }; },
+  computed: {
+    sources() {
+      return ['codex', 'devin'].map(id => ({ id, name: id === 'codex' ? 'Codex' : 'Devin',
+        label: id === 'codex' ? 'Agent execution' : 'Model requests',
+        ...(this.stats.sources?.[id] || {seconds: 0, count: 0, missing: 0}) }));
+    },
+    tasks() { return [...(this.stats.tasks || [])].sort((a,b) => b.seconds - a.seconds); },
+    filteredTasks() { return this.tasks.filter(t => this.filter === 'all' || t.source === this.filter); },
+    visibleTasks() { return this.filteredTasks.slice(0, 10); },
+    tabs() { return [{id:'all',name:'All tasks'}, ...this.sources].map(t => ({...t, count:this.tasks.filter(v => t.id === 'all' || v.source === t.id).length})); }
+  },
+  methods: {
+    parts(seconds) {
+      const n = Math.max(0, Math.floor(Number(seconds) || 0));
+      return [n >= 3600 ? {v: Math.floor(n / 3600), u:'h'} : null,
+        n >= 60 ? {v: Math.floor(n % 3600 / 60), u:'m'} : null,
+        {v: n % 60, u:'s'}].filter(Boolean);
+    },
+    duration(seconds) { return this.parts(seconds).map(p => p.v + p.u).join(' '); },
+    project(path) {
+      const parts = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean);
+      return parts.slice(-2).join(' / ') || 'No project';
+    },
+    title(task) { const title = String(task.title || '').trim(); return !title || /^(?:Codex )?session [0-9a-f-]+$/i.test(title) || title === '(untitled)' ? 'Untitled task' : title; },
+    countLabel(source, count) { return count + (source === 'codex' ? (count === 1 ? ' completed turn' : ' completed turns') : (count === 1 ? ' model request' : ' model requests')); },
+    detail(t) { return this.countLabel(t.source, t.count || 0) + (t.missing ? ' · ' + t.missing + ' without timing' : ''); }
+  },
+  template: `
+    <section class="card execution-panel" aria-label="AI execution time">
+      <header class="exec-header">
+        <div class="exec-heading"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg><h3>AI execution</h3><span class="exec-period">{{ periodLabel }}</span></div>
+        <details class="exec-help">
+          <summary aria-label="How execution time is measured">How it's measured <span aria-hidden="true">ⓘ</span></summary>
+          <div class="exec-help-content"><strong>Two different timing methods</strong><p><b>Codex</b> adds completed turns, including tools, network and waiting within a turn. Incomplete turns are excluded.</p><p><b>Devin</b> adds deduplicated model requests. Tool execution is excluded.</p><p>Neither is pure inference time. Parallel tasks are summed, not wall-clock deduplicated. Old caches may lack timing. Missing values are never replaced with session spans.</p></div>
+        </details>
+      </header>
+      <div class="exec-summaries">
+        <div v-for="s in sources" :key="s.id" class="exec-summary" :class="[s.id, {'is-empty': !s.count}]">
+          <div class="exec-source"><span class="exec-source-dot" :class="s.id"></span><strong>{{ s.name }}</strong><span>{{ s.label }}</span></div>
+          <div v-if="s.count" class="exec-value"><span v-for="p in parts(s.seconds)" :key="p.u">{{ p.v }}<small>{{ p.u }}</small></span></div>
+          <div v-else class="exec-value exec-no-value">—</div>
+          <div class="exec-summary-meta"><span>{{ s.count ? countLabel(s.id, s.count) : (s.missing || s.error ? 'Timing unavailable' : 'No recorded activity') }}</span><span v-if="s.missing" class="exec-warning">{{ s.missing }} without timing</span><span v-if="s.error" class="exec-warning" :title="s.error">Source unavailable</span></div>
+        </div>
+      </div>
+      <div class="exec-list-heading"><h4>Tasks</h4><span>{{ filteredTasks.length > 10 ? 'Top 10 of ' + filteredTasks.length : filteredTasks.length + (filteredTasks.length === 1 ? ' session' : ' sessions') }}</span></div>
+      <div class="exec-filters" role="group" aria-label="Filter execution tasks">
+        <button v-for="tab in tabs" :key="tab.id" type="button" :class="{active: filter === tab.id}" :aria-pressed="filter === tab.id" @click="filter = tab.id">{{ tab.name }}<span>{{ tab.count }}</span></button>
+      </div>
+      <div v-if="visibleTasks.length" class="exec-task-list">
+        <div class="exec-table-head" aria-hidden="true"><span>Task</span><span>Project</span><span>Time</span></div>
+        <div v-for="(t,i) in visibleTasks" :key="t.source + '|' + t.project + '|' + t.title + '|' + i" class="exec-task">
+          <div class="exec-task-main"><div class="exec-task-title" :title="title(t)">{{ title(t) }}</div><div class="exec-task-meta"><span class="exec-source-tag" :class="t.source">{{ t.source === 'codex' ? 'Codex' : 'Devin' }}</span><span :class="{'exec-warning': t.missing}" :title="detail(t)">{{ detail(t) }}</span></div></div>
+          <div class="exec-project" :title="t.project">{{ project(t.project) }}</div>
+          <div class="exec-task-time" :class="{'is-empty': !t.count}" :title="t.count ? duration(t.seconds) : 'No reliable timing available'">{{ t.count ? duration(t.seconds) : '—' }}</div>
+        </div>
+      </div>
+      <div v-else class="exec-empty"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg><span>No {{ filter === 'all' ? '' : filter === 'codex' ? 'Codex ' : 'Devin ' }}execution recorded for this day.</span></div>
+      <footer class="exec-footer">Separate timing methods <span>·</span> Parallel tasks summed</footer>
+    </section>`
+};
+
 var app = Vue.createApp({
+  components: { ExecutionPanel },
   setup: function() {
     var loading = Vue.ref(false);
     var error = Vue.ref('');

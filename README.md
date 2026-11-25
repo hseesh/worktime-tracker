@@ -222,3 +222,16 @@ python -m venv .venv
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+
+## AI Execution Time（2026-11-25）
+
+桌面今日/当日详情及移动端新增独立执行统计，不替换原 Session Duration：
+- Codex：已完成轮次的 duration_ms（缺少时使用有效开始/结束时间差），按会话和 turn_id 去重；未完成/中断且无完成记录的轮次不计入。
+- Devin：assistant metadata.metrics.total_time_ms，按会话 + request_id（缺少时使用 started_generation_at）去重；不含工具执行，不声称是服务端纯推理时间。
+- 按本地自然日切分。任务/来源时长是并行工作量之和，不是去重后的墙钟占用时间。
+- 无法测量的记录显示 missing / N/A，不用会话跨度补齐。历史缓存未重算时不含该指标。
+- 缓存在 devin_activity_daily.data_json.execution，继续使用现有刷新与云同步；旧设备缓存不贡献新指标。Codex 日志按文件 mtime/size 缓存解析结果。
+- 测试：`.venv\Scripts\python.exe -m unittest tests.test_execution_stats`。
+
+任务列表标题：Codex 优先使用本地 state_*.sqlite 的当前任务名（只读查询 id/name/title），旧版本回退到会话标题或 session_index.jsonl；无标题显示 Untitled task，不显示会话编号。标题解析不改变执行时长。
